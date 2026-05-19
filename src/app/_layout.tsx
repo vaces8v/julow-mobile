@@ -3,8 +3,10 @@ import { Stack, useRouter, useSegments } from 'expo-router';
 import { useEffect } from 'react';
 import { ActivityIndicator, Platform, StyleSheet, View, useColorScheme } from 'react-native';
 
+import { Toaster } from '@/components/toaster';
 import { AuthProvider, useAuth } from '@/contexts/auth-context';
 import { WorkspaceProvider } from '@/contexts/workspace-context';
+import { useNotificationToasts } from '@/hooks/use-notification-toasts';
 import { I18nProvider } from '@/i18n/context';
 import { startWsClient, stopWsClient } from '@/lib/ws-client';
 import { HeroUINativeProvider } from 'heroui-native';
@@ -45,6 +47,10 @@ function AuthGate() {
       stopWsClient();
     }
   }, [isAuthenticated, isLoading]);
+
+  // Show in-app toast for backend notifications (new chat messages, task
+  // assignments, status changes, etc.). Only runs when WS is up.
+  useNotificationToasts({ enabled: isAuthenticated && !isLoading });
 
   return null;
 }
@@ -92,6 +98,7 @@ function RootNavigator() {
         <Stack.Screen name="today" options={{ headerShown: false, animation: 'ios_from_right' }} />
         <Stack.Screen name="notifications" options={{ headerShown: false, animation: 'ios_from_right' }} />
       </Stack>
+      <Toaster />
     </>
   );
 }

@@ -4,6 +4,7 @@ import { useSemanticTheme, type SemanticTheme } from '@/hooks/use-semantic-theme
 import { useI18n } from '@/i18n/context';
 import { api, buildFileContentUrl, type ChatPayload, type MessagePayload, type MessageAttachmentShape } from '@/lib/api';
 import { getAccessToken } from '@/lib/api-client';
+import { setActiveChatId } from '@/lib/active-chat';
 import { subscribeChat, subscribeWsEvent, unsubscribeChat } from '@/lib/ws-client';
 import {
   ArrowLeft01Icon,
@@ -109,6 +110,7 @@ export default function ChatThreadScreen() {
   useEffect(() => {
     if (!chatId) return;
     subscribeChat(chatId);
+    setActiveChatId(chatId);
 
     const unsub = subscribeWsEvent('chat.message.created', (payload) => {
       const msgChatId = payload.chat_id as string;
@@ -142,6 +144,7 @@ export default function ChatThreadScreen() {
 
     return () => {
       unsubscribeChat(chatId);
+      setActiveChatId(null);
       unsub();
     };
   }, [chatId, user?.id]);
