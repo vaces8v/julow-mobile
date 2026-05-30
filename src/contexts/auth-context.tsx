@@ -3,17 +3,25 @@
  * user state, and login/logout flows.
  */
 
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { AppState, type AppStateStatus } from 'react-native';
 import {
+  ApiError,
   authLogin,
   authLogout,
   authRegister,
   clearTokens,
-  getAccessToken,
+  ensureFreshAccessToken,
+  getUserSnapshot,
+  hasStoredSession,
+  setUserSnapshot,
   subscribeAuthFailure,
-  ApiError,
 } from '@/lib/api-client';
+import { signInWithOAuth, type MobileOAuthProvider } from '@/lib/oauth';
 import { apiGet } from '@/lib/api-client';
+import { clearDataCache } from '@/lib/cache/data-cache';
+import { clearMutationQueue } from '@/lib/cache/mutation-queue';
+import { isDeviceOffline } from '@/lib/network-status';
 
 export interface AuthUser {
   id: string;
@@ -25,7 +33,9 @@ interface AuthContextValue {
   user: AuthUser | null;
   isLoading: boolean;
   isAuthenticated: boolean;
+  isOffline: boolean;
   login: (email: string, password: string, remember?: boolean) => Promise<void>;
+  loginWithOAuth: (provider: MobileOAuthProvider) => Promise<void>;
   register: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -33,47 +43,192 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+const AUTH_BOOTSTRAP_TIMEOUT_MS = 10_000;
+
+type BackendUser = {
+  id: string;
+  email: string;
+  status: string;
+  is_email_confirmed: boolean;
+};
+
+function mapBackendUser(data: BackendUser): AuthUser {
+  return {
+    id: data.id,
+    email: data.email,
+    status: data.status,
+  };
+}
+
+async function persistUser(user: AuthUser): Promise<void> {
+  await setUserSnapshot(user);
+}
+
+function isNetworkError(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return false;
+  return err.status === 0 || err.status === 408 || err.code === 'NETWORK_ERROR' || err.code === 'TIMEOUT';
+}
+
+async function restoreOfflineUser(generation: number): Promise<boolean> {
+  const snapshot = await getUserSnapshot();
+  if (snapshot && generation === authGeneration.current) {
+    setUser(snapshot);
+    return true;
+  }
+  if ((await hasStoredSession()) && generation === authGeneration.current) {
+    setUser({ id: 'offline', email: snapshot?.email ?? '', status: 'active' });
+    return true;
+  }
+  return false;
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isOffline, setIsOffline] = useState(false);
+  const authGeneration = useRef(0);
 
-  const fetchMe = useCallback(async () => {
-    try {
-      const token = await getAccessToken();
-      if (!token) {
+  const restoreSession = useCallback(async (generation: number) => {
+    const hasSession = await hasStoredSession();
+    if (!hasSession || generation !== authGeneration.current) {
+      if (generation === authGeneration.current) {
         setUser(null);
+        setIsOffline(false);
+      }
+      return;
+    }
+
+    const offline = await isDeviceOffline();
+    if (offline) {
+      if (generation === authGeneration.current) {
+        setIsOffline(true);
+        await restoreOfflineUser(generation);
+      }
+      return;
+    }
+
+    if (generation === authGeneration.current) setIsOffline(false);
+
+    try {
+      const res = await apiGet<BackendUser>('/account/me', undefined, {
+        timeoutMs: AUTH_BOOTSTRAP_TIMEOUT_MS,
+        noRefresh: true,
+      });
+
+      if (generation !== authGeneration.current) return;
+
+      const nextUser = mapBackendUser(res.data);
+      await persistUser(nextUser);
+      setUser(nextUser);
+      setIsOffline(false);
+    } catch (err) {
+      if (generation !== authGeneration.current) return;
+
+      const apiErr = err as ApiError | null;
+      const status = apiErr?.status;
+      const code = apiErr?.code?.toUpperCase() ?? '';
+
+      if (status === 401 && code === 'SESSION_EXPIRED') {
+        await clearTokens();
+        setUser(null);
+        setIsOffline(false);
         return;
       }
-      type BackendUser = {
-        id: string;
-        email: string;
-        status: string;
-        is_email_confirmed: boolean;
-      };
-      const res = await apiGet<BackendUser>('/account/me');
-      setUser({
-        id: res.data.id,
-        email: res.data.email,
-        status: res.data.status,
-      });
-    } catch {
+
+      if (status === 401 || isNetworkError(err)) {
+        setIsOffline(true);
+        await restoreOfflineUser(generation);
+        return;
+      }
+
       setUser(null);
+      setIsOffline(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchMe().finally(() => setIsLoading(false));
-  }, [fetchMe]);
+    let cancelled = false;
+    const generation = authGeneration.current;
+
+    void (async () => {
+      try {
+        await restoreSession(generation);
+      } finally {
+        if (!cancelled && generation === authGeneration.current) {
+          setIsLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [restoreSession]);
 
   useEffect(() => {
     return subscribeAuthFailure(() => {
+      authGeneration.current += 1;
+      clearDataCache();
+      clearMutationQueue();
       setUser(null);
+      setIsLoading(false);
     });
   }, []);
 
-  const login = useCallback(async (email: string, password: string, remember = false) => {
+  useEffect(() => {
+    const onAppState = (state: AppStateStatus) => {
+      if (state !== 'active') return;
+      void ensureFreshAccessToken();
+    };
+
+    const sub = AppState.addEventListener('change', onAppState);
+    return () => sub.remove();
+  }, []);
+
+  const login = useCallback(async (email: string, password: string, remember = true) => {
     const result = await authLogin({ email, password, isRememberMe: remember });
-    setUser({ id: result.userId, email: result.email, status: 'active' });
+    authGeneration.current += 1;
+    const generation = authGeneration.current;
+    setIsOffline(false);
+
+    try {
+      const res = await apiGet<BackendUser>('/account/me');
+      if (generation !== authGeneration.current) return;
+      const nextUser = mapBackendUser(res.data);
+      await persistUser(nextUser);
+      setUser(nextUser);
+    } catch {
+      const fallback: AuthUser = {
+        id: result.userId,
+        email: result.email,
+        status: 'active',
+      };
+      await persistUser(fallback);
+      setUser(fallback);
+    }
+  }, []);
+
+  const loginWithOAuth = useCallback(async (provider: MobileOAuthProvider) => {
+    const result = await signInWithOAuth(provider);
+    authGeneration.current += 1;
+    const generation = authGeneration.current;
+    setIsOffline(false);
+
+    try {
+      const res = await apiGet<BackendUser>('/account/me');
+      if (generation !== authGeneration.current) return;
+      const nextUser = mapBackendUser(res.data);
+      await persistUser(nextUser);
+      setUser(nextUser);
+    } catch {
+      const fallback: AuthUser = {
+        id: result.userId,
+        email: result.email,
+        status: 'active',
+      };
+      await persistUser(fallback);
+      setUser(fallback);
+    }
   }, []);
 
   const register = useCallback(async (email: string, password: string) => {
@@ -81,21 +236,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
+    authGeneration.current += 1;
+    clearDataCache();
+    clearMutationQueue();
     await authLogout();
     setUser(null);
+    setIsOffline(false);
   }, []);
+
+  const refreshUser = useCallback(async () => {
+    const generation = authGeneration.current;
+    setIsLoading(true);
+    try {
+      await restoreSession(generation);
+    } finally {
+      if (generation === authGeneration.current) {
+        setIsLoading(false);
+      }
+    }
+  }, [restoreSession]);
 
   const value = useMemo(
     () => ({
       user,
       isLoading,
       isAuthenticated: !!user,
+      isOffline,
       login,
+      loginWithOAuth,
       register,
       logout,
-      refreshUser: fetchMe,
+      refreshUser,
     }),
-    [user, isLoading, login, register, logout, fetchMe],
+    [user, isLoading, isOffline, login, loginWithOAuth, register, logout, refreshUser],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
@@ -103,9 +276,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
 const fallbackAuth: AuthContextValue = {
   user: null,
-  isLoading: true,
+  isLoading: false,
   isAuthenticated: false,
+  isOffline: false,
   login: async () => {},
+  loginWithOAuth: async () => {},
   register: async () => {},
   logout: async () => {},
   refreshUser: async () => {},
@@ -113,8 +288,6 @@ const fallbackAuth: AuthContextValue = {
 
 export function useAuth() {
   const ctx = useContext(AuthContext);
-  // Return fallback during expo-router layout discovery (renders screens
-  // before providers are mounted). Without this, the app crashes on startup.
   if (!ctx) return fallbackAuth;
   return ctx;
 }

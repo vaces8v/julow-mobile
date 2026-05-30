@@ -1,34 +1,51 @@
 {
   "expo": {
-    "name": "julow-mobile",
+    "name": "Julow",
     "slug": "julow-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
+    "newArchEnabled": false,
     "scheme": "julowmobile",
     "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "com.anonymous.julowmobile"
     },
     "android": {
+      "label": "Julow",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#0b1020",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "backgroundImage": "./assets/images/android-icon-background.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.anonymous.julowmobile"
+      "package": "com.anonymous.julowmobile",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": false,
+          "data": [
+            {
+              "scheme": "julowmobile",
+              "host": "oauth",
+              "pathPrefix": "/callback"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ]
     },
     "plugins": [
       "expo-router",
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#208AEF",
+          "backgroundColor": "#0b1020",
+          "image": "./assets/images/logo.png",
+          "imageWidth": 240,
           "android": {
-            "image": "./assets/images/splash-icon.png",
-            "imageWidth": 76
+            "image": "./assets/images/logo.png",
+            "imageWidth": 240
           }
         }
       ],
@@ -36,22 +53,39 @@
         "expo-build-properties",
         {
           "android": {
-            "reactNativeReleaseLevel": "experimental"
+            "newArchEnabled": false,
+            "reactNativeReleaseLevel": "stable",
+            "softwareKeyboardLayoutMode": "resize",
+            "buildArchs": [
+              "arm64-v8a",
+              "x86_64"
+            ],
+            "usePrecompiledHeaders": true,
+            "extraProguardRules": "-keep class org.webrtc.** { *; }\n-keep class livekit.** { *; }\n-keep class com.livekit.** { *; }\n-keep class com.swmansion.reanimated.** { *; }\n-keep class com.facebook.react.turbomodule.** { *; }\n-keep class com.facebook.hermes.unicode.** { *; }\n-keep class com.facebook.jni.** { *; }\n-keep class expo.modules.** { *; }"
           },
           "ios": {
-            "reactNativeReleaseLevel": "experimental",
-            "deploymentTarget": "15.1"
+            "reactNativeReleaseLevel": "stable",
+            "deploymentTarget": "16.4"
           }
         }
       ],
+      "./plugins/with-android-build-fix",
+      "./plugins/with-disable-expo-updates",
       "expo-image",
       "expo-font",
       "expo-web-browser",
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-status-bar",
+      "expo-localization",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Разрешите доступ к камере для сканирования QR-кода входа на сайте Julow."
+        }
+      ]
     ],
     "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
+      "typedRoutes": true
     },
     "extra": {
       "router": {},
@@ -59,11 +93,8 @@
         "projectId": "dac3e6fc-965d-42eb-a583-de88f9856b1a"
       }
     },
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
     "updates": {
-      "url": "https://u.expo.dev/dac3e6fc-965d-42eb-a583-de88f9856b1a"
+      "enabled": false
     }
   }
 }
