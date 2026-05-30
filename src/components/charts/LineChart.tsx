@@ -24,6 +24,7 @@ type Props = {
   height?: number;
   showGrid?: boolean;
   showLabels?: boolean;
+  animate?: boolean;
   style?: any;
   legend?: boolean;
 };
@@ -44,16 +45,29 @@ function smooth(points: { x: number; y: number }[]) {
   return path;
 }
 
-export function LineChart({ labels, series, height = 220, showGrid = true, showLabels = true, style, legend }: Props) {
+export function LineChart({
+  labels,
+  series,
+  height = 220,
+  showGrid = true,
+  showLabels = true,
+  animate = true,
+  style,
+  legend,
+}: Props) {
   const c = useSemanticTheme();
   const [w, setW] = React.useState(0);
   const onLayout = (e: LayoutChangeEvent) => setW(e.nativeEvent.layout.width);
 
-  const progress = useSharedValue(0);
+  const progress = useSharedValue(animate ? 0 : 1);
   useEffect(() => {
+    if (!animate) {
+      progress.value = 1;
+      return;
+    }
     progress.value = 0;
     progress.value = withTiming(1, { duration: 780 });
-  }, [progress, labels.join(','), series.length]);
+  }, [animate, progress, labels.join(','), series.length]);
   const animatedStyle = useAnimatedStyle(() => ({ opacity: progress.value }));
 
   const padL = showLabels ? 26 : 6;

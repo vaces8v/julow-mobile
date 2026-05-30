@@ -18,6 +18,7 @@
  */
 
 import { api } from '@/lib/api';
+import { ensureFreshAccessToken } from '@/lib/api-client';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -169,6 +170,7 @@ async function connect(): Promise<void> {
   if (!enabled || destroyed) return;
 
   try {
+    await ensureFreshAccessToken();
     const [info, token] = await Promise.all([
       api.getNotificationsConnectionInfo(),
       api.getWsToken(),

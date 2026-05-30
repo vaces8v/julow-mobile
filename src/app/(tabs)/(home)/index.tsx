@@ -1,13 +1,23 @@
 import { AreaChart } from '@/components/charts/AreaChart';
 import { BarChart } from '@/components/charts/BarChart';
+import { HeaderBlurBackground } from '@/components/header-blur-background';
+import { MEETING_RIPPLE_ART, MeetingCardRippleArt, meetingRippleIconColor } from '@/components/meeting-card-ripple-art';
 import { Fade } from '@/components/ui/fade';
-import { SlidingNumber } from '@/components/ui/sliding-number';
 import { SigmaRadius, SigmaTypo } from '@/constants/sigma';
 import { useAuth } from '@/contexts/auth-context';
 import { useWorkspace } from '@/contexts/workspace-context';
 import { useSemanticTheme, type SemanticTheme } from '@/hooks/use-semantic-theme';
 import { useI18n } from '@/i18n/context';
 import { api, type AnalyticsPayload, type TaskPayload } from '@/lib/api';
+import { cachedApi } from '@/lib/cache/cached-api';
+import { useCacheSync } from '@/lib/cache/use-cache-sync';
+import {
+  HOME_HEADER_RANGES,
+  homeScrollOffsetJs,
+  homeScrollY,
+  resetHomeScroll,
+  setHomeScrollOffsetJs,
+} from '@/lib/home-scroll-state';
 import {
   AlertCircleIcon,
   ArrowRight01Icon,
@@ -25,10 +35,10 @@ import {
   UserGroup02Icon
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react-native';
-import { BlurTargetView, BlurView } from 'expo-blur';
+import { BlurTargetView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router } from 'expo-router';
-import { Button, Card, Chip, Popover } from 'heroui-native';
+import { router, useFocusEffect } from 'expo-router';
+import { Chip, Popover } from 'heroui-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DeviceEventEmitter,
@@ -45,14 +55,15 @@ import {
 import Animated, {
   Extrapolation,
   interpolate,
+  runOnJS,
   useAnimatedScrollHandler,
   useAnimatedStyle,
   useSharedValue,
-  withSpring,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const { width: SCREEN_W } = Dimensions.get('window');
+const CHART_ANIMATE = Platform.OS !== 'android';
 
 // ── Helpers ────────────────────────────────────────────────────────
 function safeDate(value?: string | null): Date | null {
@@ -156,7 +167,7 @@ type ViewMode = 'board' | 'list';
 export default function DashboardScreen() {
   const insets = useSafeAreaInsets();
   const c = useSemanticTheme();
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const d = t.dashboard;
   const { activeWorkspaceId, activeProjectId, projects } = useWorkspace();
   const { user } = useAuth();
@@ -168,8 +179,10 @@ export default function DashboardScreen() {
   const userInitial = (user?.email?.[0] ?? 'U').toUpperCase();
   const userLabel = user?.email?.split('@')[0] ?? d.title;
 
-  const [tasks, setTasks] = useState<TaskPayload[]>([]);
-  const [analytics, setAnalytics] = useState<AnalyticsPayload | null>(null);
+  const [tasks, setTasks] = useState<TaskPayload[]>(() => cachedApi.getTasksSync());
+  const [analytics, setAnalytics] = useState<AnalyticsPayload | null>(() =>
+    activeWorkspaceId ? cachedApi.getAnalyticsSync(activeWorkspaceId) : null,
+  );
   const [viewMode, setViewMode] = useState<ViewMode>('board');
   const [statusMessage, setStatusMessage] = useState('');
   const [newTaskTitle, setNewTaskTitle] = useState('');
@@ -180,23 +193,48 @@ export default function DashboardScreen() {
   const [joining, setJoining] = useState(false);
   const [joinedOk, setJoinedOk] = useState(false);
 
-  const refreshData = useCallback(async () => {
+  const refreshData = useCallback(async (force = false) => {
     if (!activeWorkspaceId) return;
     const [taskList, ana] = await Promise.all([
-      api.getTasks(activeWorkspaceId),
-      api.getAnalytics(activeWorkspaceId),
+      cachedApi.getTasks({ force }),
+      cachedApi.getAnalytics(activeWorkspaceId, { force }),
     ]);
     setTasks(taskList);
     setAnalytics(ana);
   }, [activeWorkspaceId]);
 
+  const syncFromCache = useCallback(() => {
+    if (!activeWorkspaceId) return;
+    setTasks(cachedApi.getTasksSync());
+    setAnalytics(cachedApi.getAnalyticsSync(activeWorkspaceId));
+  }, [activeWorkspaceId]);
+
+  useCacheSync(syncFromCache);
+
   useEffect(() => {
-    void refreshData();
-  }, [refreshData]);
+    if (!activeWorkspaceId) return;
+    let cancelled = false;
+
+    void (async () => {
+      syncFromCache();
+      const [taskList, ana] = await Promise.all([
+        cachedApi.getTasks(),
+        cachedApi.getAnalytics(activeWorkspaceId),
+      ]);
+
+      if (cancelled) return;
+      setTasks(taskList);
+      setAnalytics(ana);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWorkspaceId]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await refreshData();
+    await refreshData(true);
     setRefreshing(false);
   }, [refreshData]);
 
@@ -204,14 +242,14 @@ export default function DashboardScreen() {
     if (!activeWorkspaceId || !newTaskTitle.trim()) return;
     const projectId = activeProjectId || projects[0]?.id;
     if (!projectId) return;
-    await api.createTask({
+    await cachedApi.createTask({
       workspaceId: activeWorkspaceId,
       projectId,
       title: newTaskTitle.trim(),
       priority: 'medium',
     });
     setNewTaskTitle('');
-    await refreshData();
+    syncFromCache();
     setStatusMessage(d.taskAdded);
     setTimeout(() => setStatusMessage(''), 2500);
   };
@@ -340,41 +378,103 @@ export default function DashboardScreen() {
   // ── Weekly chart data (real, from tasks) ──
   const weeklyData = useMemo(() => buildWeeklySeries(tasks), [tasks]);
 
-  const scrollY = useSharedValue(0);
   const scrollRef = useRef<Animated.ScrollView>(null);
+  const iconsRestX = SCREEN_W - 200;
 
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('tabPress', (tab) => {
-      if (tab === '(home)') scrollRef.current?.scrollTo({ y: 0, animated: true });
+      if (tab === '(home)') {
+        resetHomeScroll();
+        scrollRef.current?.scrollTo({ y: 0, animated: true });
+      }
     });
     return () => sub.remove();
   }, []);
 
+  useFocusEffect(
+    useCallback(() => {
+      const y = homeScrollOffsetJs;
+      if (y > 1) {
+        requestAnimationFrame(() => {
+          scrollRef.current?.scrollTo({ y, animated: false });
+        });
+      }
+    }, []),
+  );
+
   const scrollHandler = useAnimatedScrollHandler({
     onScroll: (e) => {
-      scrollY.value = e.contentOffset.y;
+      const y = e.contentOffset.y;
+      homeScrollY.value = y;
+      runOnJS(setHomeScrollOffsetJs)(y);
     },
   });
 
-  const leftIconsStyle = useAnimatedStyle(() => {
-    const tx = interpolate(scrollY.value, [-50, 0, 60, 100], [SCREEN_W - 200, SCREEN_W - 200, 0, 0], Extrapolation.CLAMP);
-    return { transform: [{ translateX: withSpring(tx, { damping: 20, stiffness: 200, mass: 0.5 }) }] };
-  });
+  const leftIconsStyle = useAnimatedStyle(() => ({
+    transform: [
+      {
+        translateX: interpolate(
+          homeScrollY.value,
+          [...HOME_HEADER_RANGES.icons],
+          [iconsRestX, iconsRestX, iconsRestX * 0.18, 0],
+          Extrapolation.CLAMP,
+        ),
+      },
+    ],
+  }));
 
   const headerBgStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [10, 50], [0, 1], Extrapolation.CLAMP),
+    opacity: interpolate(
+      homeScrollY.value,
+      [...HOME_HEADER_RANGES.bg],
+      [0, 0, 1],
+      Extrapolation.CLAMP,
+    ),
   }));
 
   const headerTitleStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [30, 60], [0, 1], Extrapolation.CLAMP),
-    transform: [{ translateY: interpolate(scrollY.value, [30, 60], [12, 0], Extrapolation.CLAMP) }],
+    opacity: interpolate(
+      homeScrollY.value,
+      [...HOME_HEADER_RANGES.title],
+      [0, 1],
+      Extrapolation.CLAMP,
+    ),
+    transform: [
+      {
+        translateY: interpolate(
+          homeScrollY.value,
+          [...HOME_HEADER_RANGES.title],
+          [14, 0],
+          Extrapolation.CLAMP,
+        ),
+      },
+    ],
   }));
 
   const largeTitleStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [0, 40], [1, 0], Extrapolation.CLAMP),
+    opacity: interpolate(
+      homeScrollY.value,
+      [...HOME_HEADER_RANGES.largeTitle],
+      [1, 0],
+      Extrapolation.CLAMP,
+    ),
     transform: [
-      { scale: interpolate(scrollY.value, [-50, 0, 40], [1.05, 1, 0.92], Extrapolation.CLAMP) },
-      { translateY: interpolate(scrollY.value, [-1000, 0, 40], [-1000, 0, -10], Extrapolation.CLAMP) },
+      {
+        scale: interpolate(
+          homeScrollY.value,
+          [-40, 0, HOME_HEADER_RANGES.largeTitle[1]],
+          [1.03, 1, 0.94],
+          Extrapolation.CLAMP,
+        ),
+      },
+      {
+        translateY: interpolate(
+          homeScrollY.value,
+          [-60, 0, HOME_HEADER_RANGES.largeTitle[1]],
+          [-14, 0, -10],
+          Extrapolation.CLAMP,
+        ),
+      },
     ],
   }));
 
@@ -387,14 +487,7 @@ export default function DashboardScreen() {
       {/* ── STICKY HEADER ── */}
       <View style={[styles.fixedHeader, { height: HEADER_H, paddingTop: insets.top }]} pointerEvents="box-none">
         <Animated.View style={[StyleSheet.absoluteFill, headerBgStyle]} pointerEvents="none">
-          <BlurView
-            {...(blurTargetRef ? { blurTarget: blurTargetRef } : {})}
-            blurMethod={Platform.OS === 'android' ? 'dimezisBlurViewSdk31Plus' : undefined}
-            intensity={c.scheme === 'dark' ? 60 : 70}
-            tint={c.scheme === 'dark' ? 'dark' : 'prominent'}
-            blurReductionFactor={Platform.OS === 'android' ? 0.5 : 1}
-            style={StyleSheet.absoluteFill}
-          />
+          <HeaderBlurBackground blurTargetRef={blurTargetRef} />
           <View style={[styles.headerBorder, { backgroundColor: c.border }]} />
         </Animated.View>
 
@@ -435,7 +528,7 @@ export default function DashboardScreen() {
                   offset={4}
                   style={{ minWidth: 220 }}
                 >
-                  <HeaderMenu c={c} t={t} locale={locale} />
+                  <HeaderMenu c={c} t={t} />
                 </Popover.Content>
               </Popover.Portal>
             </Popover>
@@ -443,7 +536,7 @@ export default function DashboardScreen() {
         </View>
       </View>
 
-      <BlurTargetView ref={blurTargetRef} style={{ flex: 1 }}>
+      <BlurTargetView ref={blurTargetRef} style={{ flex: 1 }} collapsable={false}>
       <Animated.ScrollView
         ref={scrollRef}
         onScroll={scrollHandler}
@@ -463,6 +556,12 @@ export default function DashboardScreen() {
         <Animated.View style={[styles.largeTitleContainer, largeTitleStyle]}>
           <Text style={[styles.largeTitle, { color: c.foreground }]}>{d.title}</Text>
           <Text style={[styles.largeSubtitle, { color: c.muted }]}>{d.subtitle}</Text>
+          <View style={styles.heroPulseRow}>
+            <View style={[styles.heroPulseDot, { backgroundColor: c.success }]} />
+            <Text style={[styles.heroPulseText, { color: c.muted }]}>
+              {productivity.activeNow} {d.activeNowSub.toLowerCase()}
+            </Text>
+          </View>
         </Animated.View>
 
         {/* Status chip */}
@@ -476,24 +575,24 @@ export default function DashboardScreen() {
 
         {/* Stat cards */}
         <View style={styles.statsGrid}>
-          {statCards.map((stat, i) => (
-            <Fade key={stat.label} delay={i * 70} initialY={12} style={styles.statWrap}>
+          {statCards.map((stat) => (
+            <View key={stat.label} style={styles.statWrap}>
               <StatCard stat={stat} c={c} />
-            </Fade>
+            </View>
           ))}
         </View>
 
-        {/* Join Project + Quick Add row */}
-        <Fade delay={240} style={{ paddingHorizontal: 20, marginTop: 14 }}>
-          <Card className="overflow-hidden" style={{ backgroundColor: c.surface, borderColor: c.border, borderWidth: 1 }}>
-            <Card.Body style={{ gap: 10 }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <View style={[styles.statIcon, { backgroundColor: c.accent + '1A' }]}>
-                  <HugeiconsIcon icon={UserAdd01Icon} size={18} color={c.accent} strokeWidth={1.7} />
+        {/* Join Project */}
+        <View style={{ paddingHorizontal: 20, marginTop: 16 }}>
+          <PremiumSurface c={c} accent={c.accent}>
+            <View style={styles.premiumCardBody}>
+              <View style={styles.premiumCardHead}>
+                <View style={[styles.premiumIconWrap, { backgroundColor: c.accent + '20' }]}>
+                  <HugeiconsIcon icon={UserAdd01Icon} size={20} color={c.accent} strokeWidth={1.8} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={[styles.cardHeadline, { color: c.foreground }]}>{d.joinTitle}</Text>
-                  <Text style={{ fontSize: SigmaTypo.captionSmall, color: c.muted, fontWeight: '500' }}>{d.joinHint}</Text>
+                  <Text style={[styles.premiumCardTitle, { color: c.foreground }]}>{d.joinTitle}</Text>
+                  <Text style={[styles.premiumCardHint, { color: c.muted }]}>{d.joinHint}</Text>
                 </View>
               </View>
               <View style={styles.quickAddRow}>
@@ -502,81 +601,92 @@ export default function DashboardScreen() {
                   onChangeText={(text) => { setJoinCode(text); if (joinError) setJoinError(null); }}
                   placeholder={d.joinPlaceholder}
                   placeholderTextColor={c.muted}
-                  style={[styles.quickInput, { color: c.foreground, backgroundColor: c.surfaceSecondary, borderColor: c.border }]}
+                  style={[styles.premiumInput, { color: c.foreground, backgroundColor: c.surfaceSecondary, borderColor: c.border }]}
                   editable={!joining && !joinedOk}
                   onSubmitEditing={() => void handleJoin()}
                   returnKeyType="go"
                 />
-                <Button
-                  size="sm"
+                <Pressable
                   onPress={() => void handleJoin()}
-                  variant="primary"
-                  isDisabled={!joinCode.trim() || joining || joinedOk}
+                  disabled={!joinCode.trim() || joining || joinedOk}
+                  style={({ pressed }) => [
+                    styles.premiumPrimaryBtn,
+                    { backgroundColor: c.accent, opacity: !joinCode.trim() || joining || joinedOk ? 0.45 : pressed ? 0.88 : 1 },
+                  ]}
                 >
-                  <Button.Label>
+                  <Text style={styles.premiumPrimaryBtnText}>
                     {joinedOk ? '✓' : joining ? d.joining : d.joinAction}
-                  </Button.Label>
-                </Button>
+                  </Text>
+                </Pressable>
               </View>
               {!!joinError && (
-                <Text style={{ fontSize: SigmaTypo.captionSmall, color: c.danger, fontWeight: '500' }}>{joinError}</Text>
+                <Text style={[styles.premiumError, { color: c.danger }]}>{joinError}</Text>
               )}
-            </Card.Body>
-          </Card>
-        </Fade>
+            </View>
+          </PremiumSurface>
+        </View>
 
         {/* Meetings featured card */}
-        <Fade delay={340} style={{ paddingHorizontal: 20, marginTop: 14 }}>
-          <MeetingsFeaturedCard c={c} label={t.meetings.title} subtitle={t.meetings.subtitle} joinLabel={t.meetings.join} />
-        </Fade>
+        <View style={{ paddingHorizontal: 20, marginTop: 14 }}>
+          <MeetingsFeaturedCard c={c} m={t.meetings} />
+        </View>
 
         {/* Productivity trend */}
-        <Fade delay={460} style={{ marginTop: 28, paddingHorizontal: 20 }}>
-          <Card style={{ backgroundColor: c.surface, borderWidth: 1, borderColor: c.border }} className="overflow-hidden">
-            <Card.Header>
-              <Card.Title style={{ color: c.foreground, fontSize: SigmaTypo.headline, fontWeight: '700' }}>{d.productivityTrends}</Card.Title>
-              <Text style={[styles.cardSub, { color: c.muted }]}>{d.focusHours}</Text>
-            </Card.Header>
-            <Card.Body style={{ paddingTop: 0 }}>
-              <AreaChart data={weeklyData.map((w) => ({ label: w.day, value: w.completed }))} height={180} color={c.accent} />
-            </Card.Body>
-          </Card>
-        </Fade>
+        <View style={{ marginTop: 18, paddingHorizontal: 20 }}>
+          <PremiumSurface c={c} accent={c.accent}>
+            <View style={styles.premiumCardBody}>
+              <SectionHeader c={c} eyebrow={d.focusHours} title={d.productivityTrends} />
+              <View style={[styles.chartWell, { backgroundColor: c.surfaceSecondary }]}>
+                <AreaChart
+                  data={weeklyData.map((w) => ({ label: w.day, value: w.completed }))}
+                  height={188}
+                  color={c.accent}
+                  animate={CHART_ANIMATE}
+                />
+              </View>
+            </View>
+          </PremiumSurface>
+        </View>
 
         {/* Sprint board */}
-        <Fade delay={520} style={{ marginTop: 20, paddingHorizontal: 20 }}>
-          <Card style={{ backgroundColor: c.surface, borderWidth: 1, borderColor: c.border }} className="overflow-hidden">
-            <Card.Header>
+        <View style={{ marginTop: 16, paddingHorizontal: 20 }}>
+          <PremiumSurface c={c} allowOverflow>
+            <View style={styles.premiumCardBody}>
               <View style={styles.boardHeaderRow}>
-                <Card.Title style={{ color: c.foreground, fontSize: SigmaTypo.headline, fontWeight: '700' }}>{d.sprintBoardTitle}</Card.Title>
-                <View style={styles.toggleRow}>
+                <SectionHeader c={c} title={d.sprintBoardTitle} compact />
+                <View style={[styles.toggleRow, { backgroundColor: c.surfaceSecondary, borderColor: c.border }]}>
                   <Pressable
                     onPress={() => setViewMode('board')}
-                    style={[styles.toggleBtn, viewMode === 'board' && { backgroundColor: c.accent + '22' }]}
+                    style={[styles.toggleBtn, viewMode === 'board' && { backgroundColor: c.surface }]}
                   >
                     <HugeiconsIcon icon={GridViewIcon} size={16} color={viewMode === 'board' ? c.accent : c.muted} strokeWidth={1.8} />
                   </Pressable>
                   <Pressable
                     onPress={() => setViewMode('list')}
-                    style={[styles.toggleBtn, viewMode === 'list' && { backgroundColor: c.accent + '22' }]}
+                    style={[styles.toggleBtn, viewMode === 'list' && { backgroundColor: c.surface }]}
                   >
                     <HugeiconsIcon icon={Menu01Icon} size={16} color={viewMode === 'list' ? c.accent : c.muted} strokeWidth={1.8} />
                   </Pressable>
                 </View>
               </View>
-            </Card.Header>
-            <Card.Body style={{ paddingTop: 4 }}>
               {viewMode === 'board' ? (
-                <Animated.ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={{ gap: 10, paddingRight: 4 }}
-                >
-                  {columns.map((col, idx) => (
-                    <Fade key={col.key} delay={idx * 60} initialY={8}>
-                      <View style={[styles.boardCol, { backgroundColor: c.surfaceSecondary, borderColor: c.border }]}>
+                <View style={styles.boardScrollWrap}>
+                  <Animated.ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.boardScrollContent}
+                  >
+                    {columns.map((col, idx) => (
+                      <View
+                        key={col.key}
+                        style={[
+                          styles.boardCol,
+                          { backgroundColor: c.surfaceSecondary, borderColor: c.border },
+                          idx < columns.length - 1 && styles.boardColGap,
+                        ]}
+                      >
                         <View style={styles.boardColHead}>
-                          <View style={[styles.dot, { backgroundColor: col.dot }]} />
+                          <View style={[styles.boardColAccent, { backgroundColor: col.dot }]} />
                           <Text style={[styles.boardColTitle, { color: c.foreground }]}>{col.title}</Text>
                           <View style={[styles.countBadge, { backgroundColor: c.default }]}>
                             <Text style={[styles.countBadgeText, { color: c.foreground }]}>{col.items.length}</Text>
@@ -591,67 +701,77 @@ export default function DashboardScreen() {
                             ))
                           )}
                         </View>
-                      </View>
-                    </Fade>
-                  ))}
-                </Animated.ScrollView>
+                    </View>
+                    ))}
+                  </Animated.ScrollView>
+                </View>
               ) : (
-                <View style={{ gap: 4 }}>
+                <View style={[styles.listWell, { backgroundColor: c.surfaceSecondary, borderColor: c.border }]}>
                   {tasks.slice(0, 8).map((task) => (
                     <TaskRowItem key={task.id} task={task} c={c} />
                   ))}
                   {tasks.length === 0 && (
-                    <Text style={[styles.emptyText, { color: c.muted, paddingVertical: 24 }]}>{d.noTasksYet}</Text>
+                    <Text style={[styles.emptyText, { color: c.muted, paddingVertical: 28 }]}>{d.noTasksYet}</Text>
                   )}
                 </View>
               )}
-            </Card.Body>
-          </Card>
-        </Fade>
+            </View>
+          </PremiumSurface>
+        </View>
 
         {/* Task distribution */}
-        <Fade delay={580} style={{ marginTop: 20, paddingHorizontal: 20 }}>
-          <Card style={{ backgroundColor: c.surface, borderWidth: 1, borderColor: c.border }} className="overflow-hidden">
-            <Card.Header>
-              <Card.Title style={{ color: c.foreground, fontSize: SigmaTypo.headline, fontWeight: '700' }}>{d.taskDist}</Card.Title>
-              <Text style={[styles.cardSub, { color: c.muted }]}>{d.perDayWeek}</Text>
-            </Card.Header>
-            <Card.Body style={{ paddingTop: 0 }}>
-              <BarChart data={weeklyData.map((w) => ({ label: w.day, value: w.created }))} height={160} color={c.accent} />
-            </Card.Body>
-          </Card>
-        </Fade>
+        <View style={{ marginTop: 16, paddingHorizontal: 20 }}>
+          <PremiumSurface c={c} accent="#a855f7">
+            <View style={styles.premiumCardBody}>
+              <SectionHeader c={c} eyebrow={d.perDayWeek} title={d.taskDist} />
+              <View style={[styles.chartWell, { backgroundColor: c.surfaceSecondary }]}>
+                <BarChart
+                  data={weeklyData.map((w) => ({ label: w.day, value: w.created }))}
+                  height={168}
+                  color="#a855f7"
+                  animate={CHART_ANIMATE}
+                />
+              </View>
+            </View>
+          </PremiumSurface>
+        </View>
 
         {/* Activity feed */}
-        <Fade delay={640} style={{ marginTop: 20, paddingHorizontal: 20 }}>
-          <Card style={{ backgroundColor: c.surface, borderWidth: 1, borderColor: c.border }} className="overflow-hidden">
-            <Card.Header>
-              <Card.Title style={{ color: c.foreground, fontSize: SigmaTypo.headline, fontWeight: '700' }}>{d.activity}</Card.Title>
-              <Text style={[styles.cardSub, { color: c.muted }]}>{d.activityPulse}</Text>
-            </Card.Header>
-            <Card.Body style={{ padding: 0 }}>
+        <View style={{ marginTop: 16, paddingHorizontal: 20, marginBottom: 8 }}>
+          <PremiumSurface c={c} accent={c.success}>
+            <View style={styles.premiumCardBody}>
+              <SectionHeader c={c} eyebrow={d.activityPulse} title={d.activity} />
               {activityFeed.length === 0 ? (
-                <Text style={[styles.emptyText, { color: c.muted, paddingVertical: 24 }]}>{d.noTasksYet}</Text>
-              ) : activityFeed.map((row, idx) => (
-                <View
-                  key={row.id}
-                  style={[
-                    styles.activityRow,
-                    idx < activityFeed.length - 1 && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.separator },
-                  ]}
-                >
-                  <View style={[styles.activityIcon, { backgroundColor: row.color + '22' }]}>
-                    <HugeiconsIcon icon={row.icon} size={16} color={row.color} strokeWidth={1.8} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text numberOfLines={2} style={[styles.activityTitle, { color: c.foreground }]}>{row.title}</Text>
-                    <Text style={[styles.activityMeta, { color: c.muted }]}>{row.meta}</Text>
-                  </View>
+                <Text style={[styles.emptyText, { color: c.muted, paddingVertical: 28 }]}>{d.noTasksYet}</Text>
+              ) : (
+                <View style={[styles.activityWell, { backgroundColor: c.surfaceSecondary }]}>
+                  {activityFeed.map((row, idx) => (
+                    <View
+                      key={row.id}
+                      style={[
+                        styles.activityRow,
+                        idx < activityFeed.length - 1 && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.separator },
+                      ]}
+                    >
+                      <View style={styles.activityTimeline}>
+                        <View style={[styles.activityIcon, { backgroundColor: row.color + '22' }]}>
+                          <HugeiconsIcon icon={row.icon} size={16} color={row.color} strokeWidth={1.8} />
+                        </View>
+                        {idx < activityFeed.length - 1 && (
+                          <View style={[styles.activityLine, { backgroundColor: c.separator }]} />
+                        )}
+                      </View>
+                      <View style={{ flex: 1, paddingBottom: 2 }}>
+                        <Text numberOfLines={2} style={[styles.activityTitle, { color: c.foreground }]}>{row.title}</Text>
+                        <Text style={[styles.activityMeta, { color: c.muted }]}>{row.meta}</Text>
+                      </View>
+                    </View>
+                  ))}
                 </View>
-              ))}
-            </Card.Body>
-          </Card>
-        </Fade>
+              )}
+            </View>
+          </PremiumSurface>
+        </View>
       </Animated.ScrollView>
       </BlurTargetView>
     </View>
@@ -660,11 +780,71 @@ export default function DashboardScreen() {
 
 // ─── Sub-components ──────────────────────────────────────────────────
 
-function HeaderMenu({ c, t, locale }: { c: SemanticTheme; t: ReturnType<typeof useI18n>['t']; locale: 'en' | 'ru' | 'de' }) {
-  const notifLabel = locale === 'en' ? 'Notifications' : locale === 'de' ? 'Benachrichtigungen' : 'Уведомления';
+function PremiumSurface({
+  c,
+  children,
+  accent,
+  allowOverflow,
+}: {
+  c: SemanticTheme;
+  children: React.ReactNode;
+  accent?: string;
+  allowOverflow?: boolean;
+}) {
+  const borderColors =
+    c.scheme === 'dark'
+      ? ['rgba(255,255,255,0.24)', 'rgba(255,255,255,0.06)', 'rgba(255,255,255,0.12)']
+      : ['rgba(255,255,255,0.95)', 'rgba(0,0,0,0.05)', 'rgba(255,255,255,0.7)'];
+
+  return (
+    <LinearGradient colors={borderColors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.premiumBorder}>
+      <View
+        style={[
+          styles.premiumInner,
+          { backgroundColor: c.surface },
+          allowOverflow && styles.premiumInnerVisible,
+        ]}
+      >
+        {!!accent && (
+          <LinearGradient
+            colors={[accent + '28', accent + '08', 'transparent']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.premiumSheen}
+            pointerEvents="none"
+          />
+        )}
+        <View style={styles.premiumContent}>{children}</View>
+      </View>
+    </LinearGradient>
+  );
+}
+
+function SectionHeader({
+  c,
+  eyebrow,
+  title,
+  compact,
+}: {
+  c: SemanticTheme;
+  eyebrow?: string;
+  title: string;
+  compact?: boolean;
+}) {
+  return (
+    <View style={[styles.sectionHeader, compact && { marginBottom: 10 }]}>
+      {!!eyebrow && (
+        <Text style={[styles.sectionEyebrow, { color: c.accent }]}>{eyebrow.toUpperCase()}</Text>
+      )}
+      <Text style={[styles.sectionTitle, { color: c.foreground }]}>{title}</Text>
+    </View>
+  );
+}
+
+function HeaderMenu({ c, t }: { c: SemanticTheme; t: ReturnType<typeof useI18n>['t'] }) {
   const items: { icon: any; label: string; href: any; color?: string }[] = [
-    { icon: Search01Icon, label: t.common.search.replace('...', '').replace('…', '').trim(), href: '/(tabs)/(search)' },
-    { icon: Notification03Icon, label: notifLabel, href: '/notifications' },
+    { icon: Search01Icon, label: t.tabs.search, href: '/(tabs)/(search)' },
+    { icon: Notification03Icon, label: t.notifications.title, href: '/notifications' },
     { icon: Settings02Icon, label: t.settings.title, href: '/(tabs)/(settings)' },
   ];
   return (
@@ -700,8 +880,13 @@ function StatCard({
 }) {
   const pressed = useSharedValue(0);
   const animStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: withSpring(pressed.value ? 0.97 : 1, { damping: 15, stiffness: 260 }) }],
+    transform: [{ scale: pressed.value ? 0.97 : 1 }],
   }));
+
+  const borderColors =
+    c.scheme === 'dark'
+      ? [stat.color + '55', 'rgba(255,255,255,0.08)', 'rgba(255,255,255,0.06)']
+      : [stat.color + '66', 'rgba(255,255,255,0.9)', 'rgba(0,0,0,0.04)'];
 
   return (
     <Pressable
@@ -709,29 +894,35 @@ function StatCard({
       onPressOut={() => (pressed.value = 0)}
       style={{ flex: 1 }}
     >
-      <Animated.View
-        style={[
-          styles.statCard,
-          { backgroundColor: c.surface, borderColor: c.border },
-          animStyle,
-        ]}
-      >
-        <LinearGradient
-          colors={[stat.color + '14', 'transparent']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={StyleSheet.absoluteFill}
-        />
-        <View style={[styles.statIcon, { backgroundColor: stat.color + '1A' }]}>
-          <HugeiconsIcon icon={stat.icon} size={20} color={stat.color} strokeWidth={1.7} />
-        </View>
-        <SlidingNumber
-          value={stat.value}
-          suffix={stat.suffix}
-          textStyle={{ color: c.foreground, fontSize: 26, fontWeight: '700', letterSpacing: -0.4 }}
-        />
-        <Text style={[styles.statLabel, { color: c.foreground }]}>{stat.label}</Text>
-        <Text style={[styles.statSub, { color: c.muted }]}>{stat.sub}</Text>
+      <Animated.View style={animStyle}>
+        <LinearGradient colors={borderColors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.statBorder}>
+          <View style={[styles.statCard, { backgroundColor: c.surface }]}>
+            <LinearGradient
+              colors={[stat.color + '22', stat.color + '06', 'transparent']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={StyleSheet.absoluteFill}
+              pointerEvents="none"
+            />
+            <View style={styles.statCardContent}>
+              <View style={[styles.statIconWrap, { backgroundColor: stat.color + '14' }]}>
+                <HugeiconsIcon icon={stat.icon} size={59} color={stat.color} strokeWidth={1.5} />
+              </View>
+              <View style={styles.statValueBlock}>
+                <Text style={[styles.statValue, { color: c.foreground }]}>
+                  {stat.value}
+                  {stat.suffix ?? ''}
+                </Text>
+              </View>
+              <View style={styles.statTextBlock}>
+                <Text style={[styles.statLabel, { color: c.foreground }]}>{stat.label}</Text>
+                <Text style={[styles.statSub, { color: c.muted }]} numberOfLines={1}>
+                  {stat.sub}
+                </Text>
+              </View>
+            </View>
+          </View>
+        </LinearGradient>
       </Animated.View>
     </Pressable>
   );
@@ -740,7 +931,7 @@ function StatCard({
 function TaskCardMini({ task, c }: { task: TaskPayload; c: SemanticTheme }) {
   const pressed = useSharedValue(0);
   const anim = useAnimatedStyle(() => ({
-    transform: [{ translateY: withSpring(pressed.value ? -2 : 0, { damping: 12, stiffness: 260 }) }],
+    transform: [{ translateY: pressed.value ? -2 : 0 }],
   }));
   const dotColor =
     task.priority === 'high' ? c.danger : task.priority === 'medium' ? c.warning : c.success;
@@ -751,19 +942,19 @@ function TaskCardMini({ task, c }: { task: TaskPayload; c: SemanticTheme }) {
       onPressOut={() => (pressed.value = 0)}
     >
       <Animated.View style={[styles.miniTaskCard, { backgroundColor: c.surface, borderColor: c.border }, anim]}>
-        <View style={{ flexDirection: 'row', gap: 8 }}>
-          <View style={[styles.dot, { backgroundColor: dotColor, marginTop: 6 }]} />
+        <View style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start' }}>
+          <View style={[styles.miniPriorityBar, { backgroundColor: dotColor }]} />
           <View style={{ flex: 1 }}>
             <Text numberOfLines={2} style={[styles.miniTaskTitle, { color: c.foreground }]}>{task.title}</Text>
-            <View style={{ flexDirection: 'row', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
               {task.dueDate && (
                 <Text style={[styles.miniTaskMeta, { color: c.muted }]}>
                   {new Date(task.dueDate).toLocaleDateString('ru-RU', { month: 'short', day: 'numeric' })}
                 </Text>
               )}
               {task.labels[0] && (
-                <View style={[styles.labelChip, { backgroundColor: c.default }]}>
-                  <Text style={[styles.labelChipText, { color: c.defaultForeground }]}>{task.labels[0]}</Text>
+                <View style={[styles.labelChip, { backgroundColor: c.accent + '16', borderColor: c.accent + '30' }]}>
+                  <Text style={[styles.labelChipText, { color: c.accent }]}>{task.labels[0]}</Text>
                 </View>
               )}
             </View>
@@ -775,6 +966,8 @@ function TaskCardMini({ task, c }: { task: TaskPayload; c: SemanticTheme }) {
 }
 
 function TaskRowItem({ task, c }: { task: TaskPayload; c: SemanticTheme }) {
+  const { t } = useI18n();
+  const d = t.dashboard;
   const pressed = useSharedValue(0);
   const anim = useAnimatedStyle(() => ({
     backgroundColor: pressed.value ? c.surfaceSecondary : 'transparent',
@@ -785,12 +978,12 @@ function TaskRowItem({ task, c }: { task: TaskPayload; c: SemanticTheme }) {
     task.status === 'done' ? c.success : task.status === 'in_progress' ? c.accent : task.status === 'review' ? c.warning : c.muted;
   const statusLabel =
     task.status === 'done'
-      ? 'Готово'
+      ? d.done
       : task.status === 'in_progress'
-        ? 'В работе'
+        ? d.inProgress
         : task.status === 'review'
-          ? 'Ревью'
-          : 'Todo';
+          ? d.review
+          : d.todo;
 
   return (
     <Pressable
@@ -810,69 +1003,82 @@ function TaskRowItem({ task, c }: { task: TaskPayload; c: SemanticTheme }) {
 
 function MeetingsFeaturedCard({
   c,
-  label,
-  subtitle,
-  joinLabel,
+  m,
 }: {
   c: SemanticTheme;
-  label: string;
-  subtitle: string;
-  joinLabel: string;
+  m: ReturnType<typeof useI18n>['t']['meetings'];
 }) {
-  const pressed = useSharedValue(0);
-  const anim = useAnimatedStyle(() => ({
-    transform: [
-      { scale: withSpring(pressed.value ? 0.98 : 1, { damping: 14, stiffness: 240 }) },
-    ],
+  const ctaPressed = useSharedValue(0);
+  const ctaAnim = useAnimatedStyle(() => ({
+    opacity: ctaPressed.value ? 0.88 : 1,
+    transform: [{ scale: ctaPressed.value ? 0.98 : 1 }],
   }));
-  const pulse = useSharedValue(1);
-  useEffect(() => {
-    pulse.value = withSpring(1, { damping: 12, stiffness: 160 });
-  }, [pulse]);
+
+  const iconAccent = meetingRippleIconColor(c.scheme === 'dark');
+  const borderColors =
+    c.scheme === 'dark'
+      ? ['rgba(129,140,248,0.34)', 'rgba(255,255,255,0.08)', 'rgba(255,255,255,0.05)']
+      : ['rgba(99,102,241,0.28)', 'rgba(255,255,255,0.92)', 'rgba(0,0,0,0.04)'];
+  const heroSubtitle = m.subtitle.split('—')[0]?.trim() || m.subtitle;
 
   return (
-    <Pressable
-      onPressIn={() => {
-        pressed.value = 1;
-      }}
-      onPressOut={() => {
-        pressed.value = 0;
-      }}
-      onPress={() => router.push('/meetings')}
-    >
-      <Animated.View
-        style={[
-          styles.meetingCard,
-          { backgroundColor: c.surface, borderColor: c.border },
-          anim,
-        ]}
-      >
+    <LinearGradient colors={borderColors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.meetingBorder}>
+      <View style={[styles.meetingHero, { backgroundColor: c.surface }]}>
         <LinearGradient
-          colors={[c.accent + '26', 'transparent']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
+          colors={c.scheme === 'dark' ? ['rgba(99,102,241,0.12)', 'transparent'] : ['rgba(99,102,241,0.07)', 'transparent']}
+          start={{ x: 1, y: 0 }}
+          end={{ x: 0.2, y: 1 }}
           style={StyleSheet.absoluteFill}
+          pointerEvents="none"
         />
-        <View style={[styles.meetingIcon, { backgroundColor: c.accent + '26' }]}>
-          <HugeiconsIcon icon={Call02Icon} size={22} color={c.accent} strokeWidth={1.9} />
-        </View>
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <Text style={[styles.meetingTitle, { color: c.foreground }]} numberOfLines={1}>
-            {label}
-          </Text>
-          <Text style={[styles.meetingSub, { color: c.muted }]} numberOfLines={2}>
-            {subtitle}
-          </Text>
-          <View style={styles.meetingRow}>
-            <View style={[styles.meetingPill, { backgroundColor: c.accent + '18', borderColor: c.accent + '40' }]}>
-              <HugeiconsIcon icon={UserGroup02Icon} size={12} color={c.accent} strokeWidth={1.9} />
-              <Text style={[styles.meetingPillText, { color: c.accent }]}>5</Text>
-            </View>
-            <Text style={[styles.meetingJoin, { color: c.accent }]}>{joinLabel} →</Text>
+
+        <View pointerEvents="none" style={styles.meetingArtLayer}>
+          <MeetingCardRippleArt isDark={c.scheme === 'dark'} />
+          <View style={styles.meetingIconOrb}>
+            <HugeiconsIcon
+              icon={Call02Icon}
+              size={MEETING_RIPPLE_ART.iconSize}
+              color={iconAccent}
+              strokeWidth={1.5}
+            />
           </View>
         </View>
-      </Animated.View>
-    </Pressable>
+
+        <View style={styles.meetingHeroBody}>
+          <View style={styles.meetingHeroTop}>
+            <View style={{ flex: 1, paddingRight: 96 }}>
+              <View style={[styles.meetingEyebrowPill, { backgroundColor: c.scheme === 'dark' ? 'rgba(129,140,248,0.14)' : 'rgba(99,102,241,0.08)' }]}>
+                <View style={[styles.meetingLiveDot, { backgroundColor: '#22c55e' }]} />
+                <Text style={[styles.meetingEyebrowText, { color: c.scheme === 'dark' ? '#c7d2fe' : '#4338ca' }]}>
+                  {m.preview.toUpperCase()}
+                </Text>
+              </View>
+              <Text style={[styles.meetingHeroTitle, { color: c.foreground }]}>
+                {m.title}
+              </Text>
+              <Text style={[styles.meetingHeroSub, { color: c.muted }]} numberOfLines={2}>
+                {heroSubtitle}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.meetingCtaRow}>
+            <Pressable
+              onPress={() => router.push('/meetings')}
+              onPressIn={() => { ctaPressed.value = 1; }}
+              onPressOut={() => { ctaPressed.value = 0; }}
+              accessibilityRole="button"
+              accessibilityLabel={m.join}
+            >
+              <Animated.View style={[styles.meetingCtaBtn, { backgroundColor: c.accent }, ctaAnim]}>
+                <Text style={[styles.meetingCtaText, { color: c.accentForeground }]}>{m.join}</Text>
+                <HugeiconsIcon icon={ArrowRight01Icon} size={16} color={c.accentForeground} strokeWidth={2} />
+              </Animated.View>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </LinearGradient>
   );
 }
 
@@ -937,52 +1143,287 @@ const styles = StyleSheet.create({
 
   largeTitleContainer: {
     paddingHorizontal: 20,
-    marginBottom: 16,
+    marginBottom: 12,
     paddingRight: 160,
   },
   largeTitle: {
     fontSize: SigmaTypo.largeTitle,
-    fontWeight: '700',
-    letterSpacing: -0.5,
+    fontWeight: '800',
+    letterSpacing: -0.8,
   },
   largeSubtitle: {
-    marginTop: 4,
+    marginTop: 6,
     fontSize: SigmaTypo.bodySmall,
     fontWeight: '500',
+    lineHeight: 20,
+  },
+  heroPulseRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 8,
+  },
+  heroPulseDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  heroPulseText: {
+    fontSize: SigmaTypo.captionSmall,
+    fontWeight: '600',
+    letterSpacing: 0.2,
+  },
+  meetingBorder: {
+    borderRadius: SigmaRadius.xl,
+    padding: 1,
+  },
+  meetingHero: {
+    borderRadius: SigmaRadius.xl - 1,
+    overflow: 'hidden',
+    minHeight: MEETING_RIPPLE_ART.height,
+  },
+  meetingArtLayer: {
+    position: 'absolute',
+    top: 0,
+    right: -20,
+    width: MEETING_RIPPLE_ART.width,
+    height: MEETING_RIPPLE_ART.height,
+    zIndex: 0,
+  },
+  meetingIconOrb: {
+    position: 'absolute',
+    top: MEETING_RIPPLE_ART.iconTop,
+    left: MEETING_RIPPLE_ART.iconLeft,
+    width: MEETING_RIPPLE_ART.iconSize,
+    height: MEETING_RIPPLE_ART.iconSize,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1,
+  },
+  meetingHeroBody: {
+    padding: 20,
+    gap: 18,
+    position: 'relative',
+    zIndex: 2,
+  },
+  meetingHeroTop: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  meetingEyebrowPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    marginBottom: 10,
+  },
+  meetingLiveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  meetingEyebrowText: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+  },
+  meetingHeroTitle: {
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: -0.4,
+    lineHeight: 26,
+  },
+  meetingHeroSub: {
+    marginTop: 6,
+    fontSize: SigmaTypo.bodySmall,
+    fontWeight: '500',
+    lineHeight: 20,
+  },
+  meetingCtaRow: {
+    marginTop: 2,
+  },
+  meetingCtaBtn: {
+    height: 44,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 18,
+    alignSelf: 'flex-start',
+  },
+  meetingCtaText: {
+    fontSize: SigmaTypo.bodySmall,
+    fontWeight: '700',
+    letterSpacing: 0.1,
+  },
+  premiumBorder: {
+    borderRadius: SigmaRadius.xl,
+    padding: 1,
+  },
+  premiumInner: {
+    borderRadius: SigmaRadius.xl - 1,
+    overflow: 'hidden',
+  },
+  premiumInnerVisible: {
+    overflow: 'visible',
+  },
+  premiumSheen: {
+    ...StyleSheet.absoluteFillObject,
+    pointerEvents: 'none',
+  },
+  premiumContent: {
+    position: 'relative',
+    zIndex: 1,
+  },
+  premiumCardBody: {
+    padding: 18,
+    gap: 14,
+  },
+  premiumCardHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  premiumIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  premiumCardTitle: {
+    fontSize: SigmaTypo.headline,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+  },
+  premiumCardHint: {
+    marginTop: 3,
+    fontSize: SigmaTypo.captionSmall,
+    fontWeight: '500',
+    lineHeight: 15,
+  },
+  premiumInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    fontSize: SigmaTypo.bodySmall,
+    fontWeight: '500',
+  },
+  premiumPrimaryBtn: {
+    height: 44,
+    paddingHorizontal: 18,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 88,
+  },
+  premiumPrimaryBtnText: {
+    color: '#fff',
+    fontSize: SigmaTypo.caption,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+  },
+  premiumError: {
+    fontSize: SigmaTypo.captionSmall,
+    fontWeight: '600',
+  },
+  sectionHeader: {
+    marginBottom: 4,
+  },
+  sectionEyebrow: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1.4,
+    marginBottom: 6,
+  },
+  sectionTitle: {
+    fontSize: SigmaTypo.title3,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+  },
+  chartWell: {
+    borderRadius: SigmaRadius.lg,
+    paddingVertical: 10,
+    paddingHorizontal: 6,
+    overflow: 'hidden',
+  },
+  listWell: {
+    borderRadius: SigmaRadius.lg,
+    overflow: 'hidden',
+  },
+  activityWell: {
+    borderRadius: SigmaRadius.lg,
+    overflow: 'hidden',
   },
 
   statsGrid: {
     paddingHorizontal: 20,
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 10,
-    marginTop: 4,
+    gap: 12,
+    marginTop: 2,
   },
   statWrap: {
-    width: (SCREEN_W - 40 - 10) / 2,
+    width: (SCREEN_W - 40 - 12) / 2,
+  },
+  statBorder: {
+    borderRadius: SigmaRadius.xl,
+    padding: 1,
   },
   statCard: {
-    borderRadius: SigmaRadius.lg,
-    borderWidth: 1,
-    padding: 14,
-    gap: 4,
+    borderRadius: SigmaRadius.xl - 1,
     overflow: 'hidden',
+    height: 136,
   },
-  statIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
+  statCardContent: {
+    flex: 1,
+    position: 'relative',
+    zIndex: 1,
+  },
+  statValueBlock: {
+    position: 'absolute',
+    left: 22,
+    top: 38,
+    paddingRight: 72,
+  },
+  statTextBlock: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    bottom: 16,
+    alignItems: 'flex-start',
+    gap: 3,
+  },
+  statIconWrap: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 68,
+    height: 68,
+    borderRadius: 19,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 6,
+    opacity: 0.92,
+  },
+  statValue: {
+    fontSize: 34,
+    fontWeight: '800',
+    letterSpacing: -1,
+    lineHeight: 38,
   },
   statLabel: {
-    fontSize: SigmaTypo.bodySmall,
-    fontWeight: '600',
-    marginTop: 4,
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: -0.2,
   },
   statSub: {
-    fontSize: SigmaTypo.captionSmall,
+    fontSize: SigmaTypo.caption,
     fontWeight: '500',
   },
 
@@ -1026,15 +1467,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 
-  sectionHeader: {
-    paddingHorizontal: 20,
-    marginBottom: 12,
-  },
-  sectionTitle: {
-    fontSize: SigmaTypo.headline,
-    fontWeight: '700',
-    letterSpacing: 0.1,
-  },
   shortcutsRow: {
     paddingHorizontal: 20,
     flexDirection: 'row',
@@ -1076,25 +1508,44 @@ const styles = StyleSheet.create({
   toggleRow: {
     flexDirection: 'row',
     gap: 4,
+    padding: 3,
+    borderRadius: 12,
+    borderWidth: 1,
   },
   toggleBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
+    width: 34,
+    height: 34,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
   },
+  boardScrollWrap: {
+    marginHorizontal: -2,
+    overflow: 'visible',
+  },
+  boardScrollContent: {
+    paddingHorizontal: 2,
+    paddingVertical: 2,
+  },
   boardCol: {
-    width: SCREEN_W * 0.62,
-    padding: 10,
-    borderRadius: SigmaRadius.md,
+    width: SCREEN_W * 0.64,
+    padding: 12,
+    borderRadius: SigmaRadius.lg,
     borderWidth: 1,
+  },
+  boardColGap: {
+    marginRight: 12,
   },
   boardColHead: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    marginBottom: 10,
+    gap: 8,
+    marginBottom: 12,
+  },
+  boardColAccent: {
+    width: 4,
+    height: 16,
+    borderRadius: 2,
   },
   boardColTitle: {
     flex: 1,
@@ -1116,9 +1567,15 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   miniTaskCard: {
-    padding: 10,
-    borderRadius: 10,
+    padding: 12,
+    borderRadius: 14,
     borderWidth: 1,
+  },
+  miniPriorityBar: {
+    width: 3,
+    alignSelf: 'stretch',
+    borderRadius: 2,
+    minHeight: 32,
   },
   miniTaskTitle: {
     fontSize: SigmaTypo.caption,
@@ -1130,9 +1587,10 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   labelChip: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
   },
   labelChipText: {
     fontSize: 10,
@@ -1170,13 +1628,25 @@ const styles = StyleSheet.create({
   activityRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  activityTimeline: {
+    alignItems: 'center',
+    width: 34,
+  },
+  activityLine: {
+    width: 2,
+    flex: 1,
+    minHeight: 10,
+    marginTop: 3,
+    borderRadius: 1,
+    opacity: 0.7,
   },
   activityIcon: {
-    width: 34,
-    height: 34,
+    width: 32,
+    height: 32,
     borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
@@ -1184,27 +1654,18 @@ const styles = StyleSheet.create({
   activityTitle: {
     fontSize: SigmaTypo.caption,
     fontWeight: '600',
-    lineHeight: 17,
+    lineHeight: 16,
   },
   activityMeta: {
     fontSize: SigmaTypo.captionSmall,
     fontWeight: '500',
-    marginTop: 3,
+    marginTop: 2,
   },
 
-  meetingCard: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 14,
-    padding: 16,
-    borderRadius: SigmaRadius.lg,
-    borderWidth: 1,
-    overflow: 'hidden',
-  },
   meetingIcon: {
-    width: 46,
-    height: 46,
-    borderRadius: 14,
+    width: 50,
+    height: 50,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
   },

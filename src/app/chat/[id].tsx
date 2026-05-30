@@ -1,49 +1,51 @@
+import { ChatAttachment } from '@/components/chats/chat-attachment';
+import { chatColorFromId, chatInitials, CHAT_PALETTE } from '@/components/chats/chat-avatar';
+import { ChatEmptyArt } from '@/components/chats/chat-empty-art';
+import { ChatFloatingInput } from '@/components/chats/chat-floating-input';
+import { ChatImagePreviewSheet, ChatLinkConfirmSheet } from '@/components/chats/chat-image-preview-sheet';
+import { ChatVideoPreviewSheet } from '@/components/chats/chat-video-preview-sheet';
+import { LinkifiedText } from '@/components/chats/linkified-text';
+import {
+  useChatKeyboardInsets,
+  useScrollToEndOnKeyboardShow,
+} from '@/components/chats/use-chat-keyboard-insets';
+import { HeaderBlurBackground } from '@/components/header-blur-background';
 import { SigmaRadius, SigmaTypo } from '@/constants/sigma';
 import { useAuth } from '@/contexts/auth-context';
+import { useComposerAttachments } from '@/hooks/use-composer-attachments';
 import { useSemanticTheme, type SemanticTheme } from '@/hooks/use-semantic-theme';
 import { useI18n } from '@/i18n/context';
-import { api, buildFileContentUrl, type ChatPayload, type MessagePayload, type MessageAttachmentShape } from '@/lib/api';
-import { getAccessToken } from '@/lib/api-client';
+import type { FileDisplaySource } from '@/lib/chat-attachments';
+import { api, type ChatPayload, type MessagePayload } from '@/lib/api';
+import { cachedApi } from '@/lib/cache/cached-api';
+import { useCacheSync } from '@/lib/cache/use-cache-sync';
 import { setActiveChatId } from '@/lib/active-chat';
 import { subscribeChat, subscribeWsEvent, unsubscribeChat } from '@/lib/ws-client';
 import {
   ArrowLeft01Icon,
-  File01Icon,
-  PlayIcon,
-  SentIcon,
   UserMultiple02Icon,
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react-native';
-import { BlurTargetView, BlurView } from 'expo-blur';
+import { BlurTargetView } from 'expo-blur';
+import * as WebBrowser from 'expo-web-browser';
 import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
+import { LinearGradient } from 'expo-linear-gradient';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
   FlatList,
-  Image,
-  Keyboard,
   Linking,
   Platform,
   Pressable,
   StatusBar,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import Animated, {
-  Easing,
-  FadeIn,
   FadeInDown,
   FadeOut,
   LinearTransition,
-  interpolate,
-  interpolateColor,
-  useAnimatedKeyboard,
-  useAnimatedStyle,
-  useSharedValue,
-  withSpring,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -65,7 +67,46 @@ function formatTime(iso: string, loc: 'en' | 'ru' | 'de') {
   }
 }
 
-const FALLBACK_COLORS = ['#3b82f6', '#8b5cf6', '#f97316', '#06b6d4', '#22c55e', '#ec4899'];
+function formatDayLabel(
+  iso: string,
+  locale: 'en' | 'ru' | 'de',
+  labels: { today: string; yesterday: string },
+): string {
+  try {
+    const d = new Date(iso);
+    const now = new Date();
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+
+    const sameDay =
+      d.getDate() === now.getDate() &&
+      d.getMonth() === now.getMonth() &&
+      d.getFullYear() === now.getFullYear();
+    if (sameDay) return labels.today;
+
+    const isYesterday =
+      d.getDate() === yesterday.getDate() &&
+      d.getMonth() === yesterday.getMonth() &&
+      d.getFullYear() === yesterday.getFullYear();
+    if (isYesterday) return labels.yesterday;
+
+    const tag = locale === 'ru' ? 'ru-RU' : locale === 'de' ? 'de-DE' : 'en-US';
+    return d.toLocaleDateString(tag, { weekday: 'long', day: 'numeric', month: 'long' });
+  } catch {
+    return '';
+  }
+}
+
+function isSameDay(a?: string, b?: string): boolean {
+  if (!a || !b) return false;
+  const da = new Date(a);
+  const db = new Date(b);
+  return (
+    da.getDate() === db.getDate() &&
+    da.getMonth() === db.getMonth() &&
+    da.getFullYear() === db.getFullYear()
+  );
+}
 
 export default function ChatThreadScreen() {
   const c = useSemanticTheme();
@@ -76,37 +117,82 @@ export default function ChatThreadScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const chatId = Array.isArray(params.id) ? params.id[0] : params.id;
 
-  const [chat, setChat] = useState<ChatPayload | null>(null);
-  const [messages, setMessages] = useState<MessagePayload[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [chat, setChat] = useState<ChatPayload | null>(() =>
+    chatId ? cachedApi.getChatSync(chatId) : null,
+  );
+  const [messages, setMessages] = useState<MessagePayload[]>(() =>
+    chatId ? cachedApi.getChatMessagesSync(chatId) : [],
+  );
+  const [loading, setLoading] = useState(() =>
+    chatId ? cachedApi.getChatMessagesSync(chatId).length === 0 : true,
+  );
   const [draft, setDraft] = useState('');
-  const [sending, setSending] = useState(false);
+  const {
+    pendingFiles,
+    sending,
+    setSending,
+    uploadingName,
+    setUploadingName,
+    canSend: canSendComposer,
+    pickAttachments,
+    removePendingFile,
+    clearPending,
+    inferType,
+  } = useComposerAttachments();
+  const [imagePreview, setImagePreview] = useState<{ source: FileDisplaySource; filename: string } | null>(null);
+  const [videoPreview, setVideoPreview] = useState<{ source: FileDisplaySource; filename: string } | null>(null);
+  const [linkConfirmUrl, setLinkConfirmUrl] = useState<string | null>(null);
   const listRef = useRef<FlatList<MessagePayload>>(null);
-  // Target view for Android's dimezisBlurViewSdk31Plus. Both the header and
-  // the floating input blur against this wrapper, which contains the message
-  // list (i.e. the content actually visible behind the blur).
+  const messagesRef = useRef<MessagePayload[]>([]);
   const blurTargetRef = useRef<View>(null);
 
   useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
     if (!chatId) return;
+    const cachedChat = cachedApi.getChatSync(chatId);
+    const cachedMessages = cachedApi.getChatMessagesSync(chatId);
+    setChat(cachedChat);
+    setMessages(cachedMessages);
+    setLoading(cachedMessages.length === 0);
+    setLinkConfirmUrl(null);
+    setImagePreview(null);
+    setVideoPreview(null);
+
     let cancelled = false;
     (async () => {
       try {
         const [chatData, msgData] = await Promise.all([
-          api.getChat(chatId),
-          api.getChatMessages(chatId, 100),
+          cachedApi.getChat(chatId),
+          cachedApi.getChatMessages(chatId, 100),
         ]);
         if (cancelled) return;
         setChat(chatData);
         setMessages(msgData);
         api.markChatRead(chatId).catch(() => {});
-      } catch (e) { console.error('Failed to load chat:', e); }
-      finally { if (!cancelled) setLoading(false); }
+      } catch (e) {
+        console.error('Failed to load chat:', e);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [chatId]);
 
-  // WebSocket: subscribe to chat presence & listen for new messages
+  const syncFromCache = useCallback(() => {
+    if (!chatId) return;
+    const cachedChat = cachedApi.getChatSync(chatId);
+    const cachedMessages = cachedApi.getChatMessagesSync(chatId);
+    if (cachedChat) setChat(cachedChat);
+    if (cachedMessages.length > 0) setMessages(cachedMessages);
+  }, [chatId]);
+
+  useCacheSync(syncFromCache);
+
   useEffect(() => {
     if (!chatId) return;
     subscribeChat(chatId);
@@ -115,17 +201,22 @@ export default function ChatThreadScreen() {
     const unsub = subscribeWsEvent('chat.message.created', (payload) => {
       const msgChatId = payload.chat_id as string;
       const senderId = payload.sender_id as string;
+      const messageId = payload.message_id as string | undefined;
       if (msgChatId !== chatId) return;
-      // Don't duplicate messages we just sent ourselves
       if (senderId === user?.id) return;
+      if (messageId && messagesRef.current.some((m) => m.id === messageId)) return;
 
-      // Fetch recent messages and merge any new ones
-      api.listMessages(chatId, { limit: 10 })
+      api
+        .listMessages(chatId, { limit: 5 })
         .then(({ items }) => {
-          if (items.length === 0) return;
+          const incoming = messageId
+            ? items.filter((m) => m.id === messageId)
+            : items.filter((m) => m.senderId !== user?.id);
+          if (incoming.length === 0) return;
+
           setMessages((prev) => {
-            const existing = new Set(prev.map(m => m.id));
-            const newMsgs = items.filter(m => !existing.has(m.id));
+            const existing = new Set(prev.map((m) => m.id));
+            const newMsgs = incoming.filter((m) => !existing.has(m.id));
             if (newMsgs.length === 0) return prev;
             const merged = [...prev, ...newMsgs];
             merged.sort((a, b) => {
@@ -149,29 +240,99 @@ export default function ChatThreadScreen() {
     };
   }, [chatId, user?.id]);
 
-  const hasDraft = draft.trim().length > 0;
+  const hasDraft = canSendComposer(draft);
 
   const handleSend = useCallback(async () => {
     const text = draft.trim();
-    if (!text || !chatId || sending) return;
+    const filesDraft = pendingFiles;
+    if (!canSendComposer(draft) || !chatId || sending) return;
+
     setSending(true);
+    setUploadingName(null);
+    const textDraft = draft;
+
     try {
-      const newMsg = await api.sendMessage(chatId, text);
-      setMessages((prev) => [...prev, newMsg]);
+      const newMsg = await cachedApi.sendMessage(chatId, text, { senderId: user?.id });
+      let enriched = newMsg;
+      for (const file of filesDraft) {
+        setUploadingName(file.name);
+        try {
+          const added = await api.addMessageAttachment(
+            newMsg.id,
+            { uri: file.uri, name: file.name, mimeType: file.mimeType },
+            inferType(file),
+          );
+          enriched = {
+            ...enriched,
+            attachments: [...enriched.attachments, added],
+          };
+        } catch (err) {
+          console.warn('[chat] failed to upload attachment', file.name, err);
+        }
+      }
+
       setDraft('');
+      clearPending();
+      setMessages((prev) => [...prev, enriched]);
       requestAnimationFrame(() => {
         listRef.current?.scrollToEnd({ animated: true });
       });
-    } catch (e) { console.error('Failed to send message:', e); }
-    finally { setSending(false); }
-  }, [chatId, draft, sending]);
+    } catch (e) {
+      console.error('Failed to send message:', e);
+      setDraft(textDraft);
+    } finally {
+      setSending(false);
+      setUploadingName(null);
+    }
+  }, [
+    chatId,
+    draft,
+    pendingFiles,
+    sending,
+    canSendComposer,
+    clearPending,
+    inferType,
+    setSending,
+    setUploadingName,
+    user?.id,
+  ]);
 
   const HEADER_H = insets.top + 64;
+
+  const mediaHandlers = useMemo(
+    () => ({
+      onLinkPress: (url: string) => setLinkConfirmUrl(url),
+      onImagePress: (source: FileDisplaySource, filename: string) =>
+        setImagePreview({ source, filename }),
+      onVideoPress: (source: FileDisplaySource, filename: string) =>
+        setVideoPreview({ source, filename }),
+      onFilePress: async (source: FileDisplaySource) => {
+        try {
+          await Linking.openURL(source.uri);
+        } catch (e) {
+          console.warn('[chat] failed to open file', e);
+        }
+      },
+    }),
+    [],
+  );
+
+  const handleConfirmLink = useCallback(async (url: string) => {
+    setLinkConfirmUrl(null);
+    try {
+      await WebBrowser.openBrowserAsync(url);
+    } catch (e) {
+      console.warn('[chat] failed to open link', url, e);
+      await Linking.openURL(url).catch(() => {});
+    }
+  }, []);
 
   if (loading || !chat) {
     return (
       <View style={[styles.fill, { backgroundColor: c.background, paddingTop: insets.top + 40 }]}>
-        <Text style={[styles.empty, { color: c.muted }]}>{loading ? '' : (cc.emptySelect ?? 'Chat not found')}</Text>
+        <Text style={[styles.empty, { color: c.muted }]}>
+          {loading ? '' : (cc.emptySelect ?? 'Chat not found')}
+        </Text>
       </View>
     );
   }
@@ -180,7 +341,13 @@ export default function ChatThreadScreen() {
     <View style={[styles.fill, { backgroundColor: c.background }]}>
       <StatusBar barStyle={c.scheme === 'dark' ? 'light-content' : 'dark-content'} />
 
-      <BlurTargetView ref={blurTargetRef} style={styles.fill}>
+      <LinearGradient
+        colors={[c.accent + '0A', 'transparent', c.background]}
+        style={styles.threadGlow}
+        pointerEvents="none"
+      />
+
+      <BlurTargetView ref={blurTargetRef} style={styles.fill} collapsable={false}>
         <ChatList
           listRef={listRef}
           messages={messages}
@@ -188,8 +355,13 @@ export default function ChatThreadScreen() {
           userId={user?.id}
           locale={locale}
           emptyLabel={cc.noMessages}
+          dayLabels={{ today: cc.today, yesterday: cc.yesterday }}
           headerHeight={HEADER_H}
           bottomInset={insets.bottom}
+          onLinkPress={mediaHandlers.onLinkPress}
+          onImagePress={mediaHandlers.onImagePress}
+          onVideoPress={mediaHandlers.onVideoPress}
+          onFilePress={mediaHandlers.onFilePress}
         />
       </BlurTargetView>
 
@@ -202,22 +374,60 @@ export default function ChatThreadScreen() {
         blurTargetRef={blurTargetRef}
       />
 
-      <FloatingInput
+      <ChatFloatingInput
         tone={c}
         bottomInset={insets.bottom}
         value={draft}
         onChange={setDraft}
         placeholder={cc.typeMessage}
-        onSend={handleSend}
+        onSend={() => void handleSend()}
         sendLabel={cc.send}
         hasDraft={hasDraft}
         blurTargetRef={blurTargetRef}
+        onAttachPress={() => void pickAttachments(sending)}
+        attachLabel={cc.attachFile}
+        attachDisabled={sending}
+        pendingFiles={pendingFiles}
+        onRemovePendingFile={removePendingFile}
+        sending={sending}
+        sendingLabel={cc.sendingFiles}
+        uploadingLabel={
+          uploadingName
+            ? cc.uploadingFile.replace('{name}', uploadingName)
+            : undefined
+        }
+      />
+
+      <ChatImagePreviewSheet
+        open={imagePreview !== null}
+        onOpenChange={(open) => { if (!open) setImagePreview(null); }}
+        source={imagePreview?.source ?? null}
+        filename={imagePreview?.filename ?? ''}
+        tone={c}
+      />
+
+      <ChatVideoPreviewSheet
+        open={videoPreview !== null}
+        onOpenChange={(open) => { if (!open) setVideoPreview(null); }}
+        source={videoPreview?.source ?? null}
+        filename={videoPreview?.filename ?? ''}
+        tone={c}
+      />
+
+      <ChatLinkConfirmSheet
+        open={linkConfirmUrl !== null}
+        url={linkConfirmUrl}
+        tone={c}
+        title={cc.linkConfirmTitle}
+        description={cc.linkConfirmDesc}
+        cancelLabel={cc.linkConfirmCancel}
+        openLabel={cc.linkConfirmOpen}
+        onCancel={() => setLinkConfirmUrl(null)}
+        onConfirm={handleConfirmLink}
       />
     </View>
   );
 }
-
-/* ─── ChatList ──────────────────────────────────────────────────────────── */
 
 function ChatList({
   listRef,
@@ -226,8 +436,13 @@ function ChatList({
   userId,
   locale,
   emptyLabel,
+  dayLabels,
   headerHeight,
   bottomInset,
+  onLinkPress,
+  onImagePress,
+  onVideoPress,
+  onFilePress,
 }: {
   listRef: React.RefObject<FlatList<MessagePayload> | null>;
   messages: MessagePayload[];
@@ -235,36 +450,16 @@ function ChatList({
   userId: string | undefined;
   locale: 'en' | 'ru' | 'de';
   emptyLabel: string;
+  dayLabels: { today: string; yesterday: string };
   headerHeight: number;
   bottomInset: number;
+  onLinkPress: (url: string) => void;
+  onImagePress: (source: FileDisplaySource, filename: string) => void;
+  onVideoPress: (source: FileDisplaySource, filename: string) => void;
+  onFilePress: (source: FileDisplaySource, filename: string) => void;
 }) {
-  /* Reserve space for the floating input + dynamic keyboard via an
-   * animated footer spacer.  FlatList's `contentContainerStyle` is applied
-   * to an internal (non-animated) View, so we can't drive it from a
-   * shared value directly; the footer trick is the canonical workaround. */
-  const keyboard = useAnimatedKeyboard();
-  const baseInset = Math.max(bottomInset, 12);
-  const PILL_HEIGHT = 64;
-
-  const footerStyle = useAnimatedStyle(() => ({
-    height: baseInset + PILL_HEIGHT + keyboard.height.value,
-  }));
-
-  /* Whenever the keyboard opens, snap to the bottom of the list.
-   * We use a plain JS Keyboard listener rather than `useAnimatedReaction`
-   * because that would capture `listRef` inside a worklet — Reanimated
-   * then "freezes" the ref object and warns when FlatList later writes
-   * to `.current`. The animated footer height above is purely visual and
-   * doesn't touch the ref, so it stays on the UI thread happily. */
-  useEffect(() => {
-    const evt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const sub = Keyboard.addListener(evt, () => {
-      requestAnimationFrame(() => {
-        listRef.current?.scrollToEnd({ animated: true });
-      });
-    });
-    return () => sub.remove();
-  }, [listRef]);
+  const { footerStyle } = useChatKeyboardInsets(bottomInset);
+  useScrollToEndOnKeyboardShow(listRef);
 
   return (
     <FlatList
@@ -273,39 +468,109 @@ function ChatList({
       keyExtractor={(m: MessagePayload) => m.id}
       keyboardDismissMode="interactive"
       keyboardShouldPersistTaps="handled"
+      removeClippedSubviews
+      windowSize={7}
+      maxToRenderPerBatch={10}
+      initialNumToRender={15}
       contentContainerStyle={{
         paddingTop: headerHeight + 16,
         paddingHorizontal: 14,
-        gap: 8,
+        gap: 6,
+        flexGrow: 1,
       }}
       style={styles.fill}
       showsVerticalScrollIndicator={false}
       onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
       ListEmptyComponent={
         <View style={styles.listEmpty}>
-          <Text style={[styles.listEmptyText, { color: tone.muted }]}>{emptyLabel}</Text>
+          <ChatEmptyArt />
+          <Text style={[styles.listEmptyTitle, { color: tone.foreground }]}>{emptyLabel}</Text>
         </View>
       }
       ListFooterComponent={<Animated.View style={footerStyle} />}
-      renderItem={({ item, index }: { item: MessagePayload; index: number }) => {
-        const prev = messages[index - 1];
-        const sameAuthorAsPrev = prev?.senderId === item.senderId;
-        return (
-          <Bubble
-            msg={item}
-            tone={tone}
-            isMe={item.senderId === userId}
-            isLocal={item.id.startsWith('local-')}
-            groupWithPrev={sameAuthorAsPrev}
-            locale={locale}
-          />
-        );
-      }}
+      renderItem={({ item, index }: { item: MessagePayload; index: number }) => (
+        <MessageRow
+          item={item}
+          index={index}
+          messages={messages}
+          tone={tone}
+          userId={userId}
+          locale={locale}
+          dayLabels={dayLabels}
+          onLinkPress={onLinkPress}
+          onImagePress={onImagePress}
+          onVideoPress={onVideoPress}
+          onFilePress={onFilePress}
+        />
+      )}
     />
   );
 }
 
-/* ─── Header ────────────────────────────────────────────────────────────── */
+const MessageRow = React.memo(function MessageRow({
+  item,
+  index,
+  messages,
+  tone,
+  userId,
+  locale,
+  dayLabels,
+  onLinkPress,
+  onImagePress,
+  onVideoPress,
+  onFilePress,
+}: {
+  item: MessagePayload;
+  index: number;
+  messages: MessagePayload[];
+  tone: SemanticTheme;
+  userId: string | undefined;
+  locale: 'ru' | 'en' | 'de';
+  dayLabels: { today: string; yesterday: string };
+  onLinkPress: (url: string) => void;
+  onImagePress: (source: FileDisplaySource, filename: string) => void;
+  onVideoPress: (source: FileDisplaySource, filename: string) => void;
+  onFilePress: (source: FileDisplaySource, filename: string) => void;
+}) {
+  const prev = messages[index - 1];
+  const sameAuthorAsPrev = prev?.senderId === item.senderId;
+  const showDay = !prev || !isSameDay(prev.createdAt, item.createdAt);
+
+  return (
+    <View>
+      {showDay && item.createdAt ? (
+        <DaySeparator
+          label={formatDayLabel(item.createdAt, locale, dayLabels)}
+          tone={tone}
+        />
+      ) : null}
+      <Bubble
+        msg={item}
+        tone={tone}
+        isMe={item.senderId === userId}
+        isLocal={item.id.startsWith('local-')}
+        groupWithPrev={sameAuthorAsPrev && !showDay}
+        locale={locale}
+        onLinkPress={onLinkPress}
+        onImagePress={onImagePress}
+        onVideoPress={onVideoPress}
+        onFilePress={onFilePress}
+      />
+    </View>
+  );
+});
+
+function DaySeparator({ label, tone }: { label: string; tone: SemanticTheme }) {
+  return (
+    <View style={styles.dayRow}>
+      <View style={[styles.dayLine, { backgroundColor: tone.border }]} />
+      <View style={[styles.dayPill, { backgroundColor: tone.surfaceSecondary, borderColor: tone.border }]}>
+        <Text style={[styles.dayText, { color: tone.muted }]}>{label}</Text>
+      </View>
+      <View style={[styles.dayLine, { backgroundColor: tone.border }]} />
+    </View>
+  );
+}
 
 function ThreadHeader({
   chat,
@@ -323,10 +588,10 @@ function ThreadHeader({
   blurTargetRef: React.RefObject<View | null>;
 }) {
   const isDm = chat.chatType === 'dm';
-  const chatColor = chat.color ?? FALLBACK_COLORS[chat.id.charCodeAt(0) % FALLBACK_COLORS.length];
+  const chatColor = chatColorFromId(chat.id, chat.color);
   const title = chat.name ?? (isDm ? 'Direct Message' : 'Group');
   const subtitle = isDm ? directLabel : `${chat.members?.length ?? 0} members · ${hint}`;
-  const initials = title.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+  const initials = chatInitials(title);
 
   return (
     <View
@@ -334,39 +599,39 @@ function ThreadHeader({
       pointerEvents="box-none"
     >
       {IOS_GLASS ? (
-        <GlassView
-          glassEffectStyle="regular"
-          colorScheme={tone.scheme}
-          style={StyleSheet.absoluteFill}
-        />
+        <GlassView glassEffectStyle="regular" colorScheme={tone.scheme} style={StyleSheet.absoluteFill} />
       ) : (
-        <BlurView
-          {...(Platform.OS === 'android' ? { blurTarget: blurTargetRef, blurMethod: 'dimezisBlurViewSdk31Plus' as const } : {})}
-          intensity={tone.scheme === 'dark' ? 60 : 70}
-          tint={tone.scheme === 'dark' ? 'dark' : 'prominent'}
-          blurReductionFactor={Platform.OS === 'android' ? 0.5 : 1}
-          style={StyleSheet.absoluteFill}
-        />
+        <HeaderBlurBackground blurTargetRef={blurTargetRef} />
       )}
       <View style={[styles.headerBorder, { backgroundColor: tone.border }]} />
       <View style={styles.headerRow}>
         <Pressable
-          style={styles.iconBtn}
+          style={[styles.iconBtn, { backgroundColor: tone.surfaceSecondary }]}
           onPress={() => router.back()}
           hitSlop={10}
-          android_ripple={{ color: tone.surfaceSecondary, borderless: true, radius: 22 }}
+          android_ripple={{ color: tone.surfaceTertiary, borderless: true, radius: 22 }}
         >
           <HugeiconsIcon icon={ArrowLeft01Icon} size={22} color={tone.foreground} strokeWidth={1.8} />
         </Pressable>
 
         {isDm ? (
-          <View style={[styles.headerPeerAvatar, { backgroundColor: chatColor }]}>
+          <LinearGradient
+            colors={[chatColor, `${chatColor}CC`]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={[styles.headerPeerAvatar, { borderCurve: 'continuous' }]}
+          >
             <Text style={styles.headerPeerInitials}>{initials}</Text>
-          </View>
+          </LinearGradient>
         ) : (
-          <View style={[styles.headerGroupAvatar, { backgroundColor: chatColor }]}>
+          <LinearGradient
+            colors={[chatColor, `${chatColor}CC`]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={[styles.headerGroupAvatar, { borderCurve: 'continuous' }]}
+          >
             <HugeiconsIcon icon={UserMultiple02Icon} size={18} color="#fff" strokeWidth={1.9} />
-          </View>
+          </LinearGradient>
         )}
 
         <View style={styles.headerTitles}>
@@ -377,21 +642,22 @@ function ThreadHeader({
             {subtitle}
           </Text>
         </View>
-
       </View>
     </View>
   );
 }
 
-/* ─── Bubble ────────────────────────────────────────────────────────────── */
-
-function Bubble({
+const Bubble = React.memo(function Bubble({
   msg,
   tone,
   isMe,
   isLocal,
   groupWithPrev,
   locale,
+  onLinkPress,
+  onImagePress,
+  onVideoPress,
+  onFilePress,
 }: {
   msg: MessagePayload;
   tone: SemanticTheme;
@@ -399,37 +665,120 @@ function Bubble({
   isLocal: boolean;
   groupWithPrev: boolean;
   locale: 'ru' | 'en' | 'de';
+  onLinkPress: (url: string) => void;
+  onImagePress: (source: FileDisplaySource, filename: string) => void;
+  onVideoPress: (source: FileDisplaySource, filename: string) => void;
+  onFilePress: (source: FileDisplaySource, filename: string) => void;
 }) {
   const myBg = tone.accent;
-  const peerBg = tone.surfaceSecondary;
+  const peerBg = tone.surface;
   const myFg = tone.accentForeground;
   const peerFg = tone.foreground;
 
   const senderInitial = msg.senderId?.slice(0, 1).toUpperCase() ?? '?';
-  const senderColor = FALLBACK_COLORS[msg.senderId.charCodeAt(0) % FALLBACK_COLORS.length];
+  const senderColor = CHAT_PALETTE[msg.senderId.charCodeAt(0) % CHAT_PALETTE.length];
   const showAvatar = !isMe && !groupWithPrev;
+
+  const rowStyle = [
+    styles.bubbleRow,
+    isMe ? styles.bubbleRowMe : styles.bubbleRowPeer,
+    groupWithPrev && { marginTop: -2 },
+  ];
+
+  if (!isLocal) {
+    return (
+      <View style={rowStyle}>
+        {!isMe && (
+          <View style={styles.avatarSlot}>
+            {showAvatar && (
+              <LinearGradient
+                colors={[senderColor, `${senderColor}CC`]}
+                style={[styles.msgAvatar, { borderCurve: 'continuous' }]}
+              >
+                <Text style={styles.msgAvatarInitials}>{senderInitial}</Text>
+              </LinearGradient>
+            )}
+          </View>
+        )}
+        <View
+          style={[
+            styles.bubble,
+            isMe
+              ? {
+                  backgroundColor: myBg,
+                  borderTopRightRadius: groupWithPrev ? 16 : 8,
+                  borderTopLeftRadius: 20,
+                  borderBottomLeftRadius: 20,
+                  borderBottomRightRadius: 20,
+                  borderCurve: 'continuous',
+                  boxShadow: '0 4px 14px rgba(37,99,235,0.22)',
+                }
+              : {
+                  backgroundColor: peerBg,
+                  borderColor: tone.border,
+                  borderWidth: StyleSheet.hairlineWidth,
+                  borderTopLeftRadius: groupWithPrev ? 16 : 8,
+                  borderTopRightRadius: 20,
+                  borderBottomLeftRadius: 20,
+                  borderBottomRightRadius: 20,
+                  borderCurve: 'continuous',
+                  boxShadow: '0 2px 10px rgba(0,0,0,0.05)',
+                },
+          ]}
+        >
+          {!!msg.content && (
+            <LinkifiedText
+              text={msg.content}
+              style={[styles.bubbleText, { color: isMe ? myFg : peerFg }]}
+              linkStyle={{
+                color: isMe ? myFg : tone.accent,
+                textDecorationLine: 'underline',
+                fontWeight: '600',
+              }}
+              onLinkPress={onLinkPress}
+            />
+          )}
+          {msg.attachments?.length > 0 && (
+            <View style={[styles.attachmentsCol, { marginTop: msg.content ? 6 : 0 }]}>
+              {msg.attachments.map((att) => (
+                <ChatAttachment
+                  key={att.id}
+                  att={att}
+                  tone={tone}
+                  isMe={isMe}
+                  onImagePress={onImagePress}
+                  onVideoPress={onVideoPress}
+                  onFilePress={onFilePress}
+                />
+              ))}
+            </View>
+          )}
+          {msg.createdAt && (
+            <Text style={[styles.bubbleTime, { color: isMe ? myFg + 'B8' : tone.muted }]}>
+              {formatTime(msg.createdAt, locale)}
+            </Text>
+          )}
+        </View>
+      </View>
+    );
+  }
 
   return (
     <Animated.View
-      entering={
-        isLocal
-          ? FadeInDown.springify().damping(22).stiffness(260)
-          : FadeIn.duration(220).easing(Easing.out(Easing.quad))
-      }
+      entering={FadeInDown.springify().damping(22).stiffness(260)}
       exiting={FadeOut.duration(120)}
       layout={LinearTransition.springify().damping(22)}
-      style={[
-        styles.bubbleRow,
-        isMe ? styles.bubbleRowMe : styles.bubbleRowPeer,
-        groupWithPrev && { marginTop: -2 },
-      ]}
+      style={rowStyle}
     >
       {!isMe && (
         <View style={styles.avatarSlot}>
           {showAvatar && (
-            <View style={[styles.msgAvatar, { backgroundColor: senderColor }]}>
+            <LinearGradient
+              colors={[senderColor, `${senderColor}CC`]}
+              style={[styles.msgAvatar, { borderCurve: 'continuous' }]}
+            >
               <Text style={styles.msgAvatarInitials}>{senderInitial}</Text>
-            </View>
+            </LinearGradient>
           )}
         </View>
       )}
@@ -438,350 +787,78 @@ function Bubble({
           styles.bubble,
           isMe
             ? {
-              backgroundColor: myBg,
-              borderTopRightRadius: groupWithPrev ? 14 : 6,
-              borderTopLeftRadius: 18,
-              borderBottomLeftRadius: 18,
-              borderBottomRightRadius: 18,
-            }
+                backgroundColor: myBg,
+                borderTopRightRadius: groupWithPrev ? 16 : 8,
+                borderTopLeftRadius: 20,
+                borderBottomLeftRadius: 20,
+                borderBottomRightRadius: 20,
+                borderCurve: 'continuous',
+                boxShadow: '0 4px 14px rgba(37,99,235,0.22)',
+              }
             : {
-              backgroundColor: peerBg,
-              borderTopLeftRadius: groupWithPrev ? 14 : 6,
-              borderTopRightRadius: 18,
-              borderBottomLeftRadius: 18,
-              borderBottomRightRadius: 18,
-            },
+                backgroundColor: peerBg,
+                borderColor: tone.border,
+                borderWidth: StyleSheet.hairlineWidth,
+                borderTopLeftRadius: groupWithPrev ? 16 : 8,
+                borderTopRightRadius: 20,
+                borderBottomLeftRadius: 20,
+                borderBottomRightRadius: 20,
+                borderCurve: 'continuous',
+                boxShadow: '0 2px 10px rgba(0,0,0,0.05)',
+              },
         ]}
       >
         {!!msg.content && (
-          <Text style={[styles.bubbleText, { color: isMe ? myFg : peerFg }]}>{msg.content}</Text>
+          <LinkifiedText
+            text={msg.content}
+            style={[styles.bubbleText, { color: isMe ? myFg : peerFg }]}
+            linkStyle={{
+              color: isMe ? myFg : tone.accent,
+              textDecorationLine: 'underline',
+              fontWeight: '600',
+            }}
+            onLinkPress={onLinkPress}
+          />
         )}
         {msg.attachments?.length > 0 && (
-          <View style={{ gap: 6, marginTop: msg.content ? 6 : 0 }}>
+          <View style={[styles.attachmentsCol, { marginTop: msg.content ? 6 : 0 }]}>
             {msg.attachments.map((att) => (
-              <Attachment key={att.id} att={att} tone={tone} isMe={isMe} />
+              <ChatAttachment
+                key={att.id}
+                att={att}
+                tone={tone}
+                isMe={isMe}
+                onImagePress={onImagePress}
+                onVideoPress={onVideoPress}
+                onFilePress={onFilePress}
+              />
             ))}
           </View>
         )}
         {msg.createdAt && (
-          <Text
-            style={[styles.bubbleTime, { color: isMe ? myFg + 'B8' : tone.muted }]}
-          >
+          <Text style={[styles.bubbleTime, { color: isMe ? myFg + 'B8' : tone.muted }]}>
             {formatTime(msg.createdAt, locale)}
           </Text>
         )}
       </View>
     </Animated.View>
   );
-}
-
-/* ─── FloatingInput ─────────────────────────────────────────────────────── */
-
-function FloatingInput({
-  tone,
-  bottomInset,
-  value,
-  onChange,
-  placeholder,
-  onSend,
-  sendLabel,
-  hasDraft,
-  blurTargetRef,
-}: {
-  tone: SemanticTheme;
-  bottomInset: number;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder: string;
-  onSend: () => void;
-  sendLabel: string;
-  hasDraft: boolean;
-  blurTargetRef: React.RefObject<View | null>;
-}) {
-  /* Animated progress 0 → 1 for send button color/scale */
-  const p = useSharedValue(0);
-  useEffect(() => {
-    p.value = withSpring(hasDraft ? 1 : 0, { damping: 16, stiffness: 280, mass: 0.7 });
-  }, [hasDraft, p]);
-
-  const pulse = useSharedValue(1);
-  useEffect(() => {
-    if (hasDraft) {
-      pulse.value = withSpring(1.08, { damping: 10, stiffness: 260, mass: 0.4 }, () => {
-        pulse.value = withSpring(1, { damping: 14, stiffness: 240, mass: 0.5 });
-      });
-    }
-  }, [hasDraft, pulse]);
-
-  /* Synchronous keyboard tracking via Reanimated.
-   * `keyboard.height` is a shared value that updates every frame in lock-step
-   * with the keyboard animation — no more stale-listener lag on first focus. */
-  const keyboard = useAnimatedKeyboard();
-
-  const sendBgStyle = useAnimatedStyle(() => ({
-    backgroundColor: interpolateColor(
-      p.value,
-      [0, 1],
-      [tone.surfaceTertiary, tone.accent],
-    ),
-    transform: [{ scale: pulse.value }],
-  }));
-
-  /* Icon color is resolved on JS thread (can't animate SVG color via shared value). */
-  const sendIconColor = hasDraft ? '#ffffff' : tone.muted;
-
-  /* When keyboard is open we drop the navbar gesture inset (kb covers it).
-   * When closed we restore it so the pill doesn't sit on the gesture bar. */
-  const baseInset = Math.max(bottomInset, 12);
-  const pillStyle = useAnimatedStyle(() => {
-    // Smoothly collapse the bottom padding as the keyboard grows past ~40px.
-    const compact = interpolate(keyboard.height.value, [0, 40], [baseInset, 6], 'clamp');
-
-    // The host is anchored at the screen bottom (styles.floatingHost). We lift
-    // it by the live keyboard height so the pill sits flush above the
-    // keyboard on both iOS and Android — frame-accurate, no first-focus lag.
-    const lift = -keyboard.height.value;
-
-    return {
-      paddingBottom: compact,
-      transform: [{ translateY: lift }],
-    };
-  });
-
-  const content = (
-    <Animated.View
-      style={[
-        styles.floatingHost,
-        styles.pillOuter,
-        {
-          paddingHorizontal: IOS_GLASS ? 10 : 0,
-          paddingTop: IOS_GLASS ? 4 : 6,
-        },
-        pillStyle,
-      ]}
-      pointerEvents="box-none"
-    >
-      {/* Non-glass: blur background strip behind the pill */}
-      {!IOS_GLASS && (
-        <>
-          <BlurView
-            {...(Platform.OS === 'android' ? { blurTarget: blurTargetRef, blurMethod: 'dimezisBlurViewSdk31Plus' as const } : {})}
-            intensity={70}
-            tint={tone.scheme === 'dark' ? 'dark' : 'light'}
-            blurReductionFactor={Platform.OS === 'android' ? 0.5 : 1}
-            style={StyleSheet.absoluteFill}
-          />
-          <View style={[styles.pillTopBorder, { backgroundColor: tone.border }]} />
-        </>
-      )}
-
-      <View style={styles.pillRow}>
-        {/* The pill itself */}
-        <View
-          style={[
-            styles.pill,
-            IOS_GLASS
-              ? { backgroundColor: 'transparent' }
-              : { backgroundColor: tone.surfaceSecondary, borderColor: tone.border, borderWidth: StyleSheet.hairlineWidth },
-          ]}
-        >
-          {IOS_GLASS && (
-            <GlassView
-              glassEffectStyle="regular"
-              colorScheme={tone.scheme}
-              isInteractive
-              style={[StyleSheet.absoluteFill, { borderRadius: 28, overflow: 'hidden' }]}
-            />
-          )}
-
-          <TextInput
-            value={value}
-            onChangeText={onChange}
-            placeholder={placeholder}
-            placeholderTextColor={tone.muted}
-            style={[styles.pillInput, { color: tone.foreground }]}
-            multiline
-            returnKeyType="default"
-            blurOnSubmit={false}
-            textAlignVertical="center"
-          />
-
-          <Pressable
-            accessibilityLabel={sendLabel}
-            onPress={onSend}
-            disabled={!hasDraft}
-            hitSlop={6}
-            style={({ pressed }) => [styles.sendWrap, { opacity: pressed && hasDraft ? 0.85 : 1 }]}
-          >
-            <Animated.View style={[styles.sendBtn, sendBgStyle]}>
-              <HugeiconsIcon icon={SentIcon} size={18} color={sendIconColor} strokeWidth={2.2} />
-            </Animated.View>
-          </Pressable>
-        </View>
-      </View>
-    </Animated.View>
-  );
-
-  return content;
-}
-
-/* ─── Attachment ────────────────────────────────────────────────────────── */
-
-const IMAGE_EXT = /\.(jpe?g|png|gif|webp|heic|heif|bmp|avif)$/i;
-const VIDEO_EXT = /\.(mp4|mov|webm|mkv|avi|m4v)$/i;
-
-
-function classifyAttachment(att: MessageAttachmentShape): 'image' | 'video' | 'file' {
-  const mime = (att.mimeType ?? '').toLowerCase();
-  // Prefix-match handles real MIMEs ("image/png") AND wildcards ("image/*")
-  // that the backend may send via the `attachment_type` shortcut.
-  if (mime.startsWith('image/')) return 'image';
-  if (mime.startsWith('video/')) return 'video';
-  const name = att.filename ?? '';
-  if (IMAGE_EXT.test(name)) return 'image';
-  if (VIDEO_EXT.test(name)) return 'video';
-  return 'file';
-}
-
-function formatFileSize(bytes?: number): string {
-  if (!bytes || bytes <= 0) return '';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function fileExt(name: string): string {
-  const dot = name.lastIndexOf('.');
-  return dot >= 0 ? name.slice(dot + 1).toUpperCase().slice(0, 4) : 'FILE';
-}
-
-function Attachment({ att, tone, isMe }: { att: MessageAttachmentShape; tone: SemanticTheme; isMe: boolean }) {
-  const kind = classifyAttachment(att);
-
-  // Inline image/video preview is fetched via the auth-aware web proxy:
-  // `${WEB_BASE_URL}/api/proxy/files/{id}/content`. The proxy forwards to
-  // backend `/files/{id}/content`, which streams the bytes (Bearer-authed).
-  // We deliberately do NOT use `att.url` / `att.previewUrl`: those point at
-  // the Docker-internal MinIO host (`http://minio:9000/...`), which is
-  // unreachable from devices.
-  const contentUrl = buildFileContentUrl(att.fileId);
-
-  const [authHeader, setAuthHeader] = useState<string | null>(null);
-  const [resolveError, setResolveError] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    getAccessToken()
-      .then((token) => {
-        if (cancelled) return;
-        setAuthHeader(token ? `Bearer ${token}` : null);
-      })
-      .catch((e) => {
-        console.warn('[chat] failed to read access token for attachment', att.fileId, e);
-        if (!cancelled) setResolveError(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [att.fileId]);
-
-  // For tap-to-open we still need a publicly fetchable URL because the system
-  // browser / OS share sheet won't have our Bearer token. We fall back to the
-  // presigned URL endpoint here — if MinIO is publicly reachable in the deploy
-  // it will work; if not, this just no-ops with a warning.
-  const handlePress = async () => {
-    try {
-      const dl = await api.getFileDownloadUrl(att.fileId);
-      await Linking.openURL(dl.url);
-    } catch (e) {
-      console.warn('[chat] failed to open attachment', att.fileId, att.filename, e);
-    }
-  };
-
-  const onImageError = () => {
-    console.warn('[chat] Image failed to load via proxy', att.fileId, att.filename, contentUrl);
-    setResolveError(true);
-  };
-
-  const imageSource = authHeader
-    ? { uri: contentUrl, headers: { Authorization: authHeader } }
-    : null;
-
-  if (kind === 'image') {
-    return (
-      <Pressable onPress={handlePress} style={[styles.attImageWrap, { backgroundColor: tone.surfaceSecondary }]}>
-        {imageSource && !resolveError ? (
-          <Image
-            source={imageSource}
-            style={styles.attImage}
-            resizeMode="cover"
-            onError={onImageError}
-          />
-        ) : (
-          <View style={styles.attMediaPlaceholder}>
-            {resolveError ? (
-              <Text style={[styles.attMediaPlaceholderText, { color: tone.muted }]}>{att.filename || 'Image'}</Text>
-            ) : (
-              <ActivityIndicator color={tone.muted} />
-            )}
-          </View>
-        )}
-      </Pressable>
-    );
-  }
-
-  if (kind === 'video') {
-    return (
-      <Pressable onPress={handlePress} style={[styles.attImageWrap, { backgroundColor: '#000' }]}>
-        {imageSource && !resolveError && (
-          <Image
-            source={imageSource}
-            style={styles.attImage}
-            resizeMode="cover"
-            onError={onImageError}
-          />
-        )}
-        <View style={styles.attVideoOverlay}>
-          <View style={styles.attPlayBtn}>
-            <HugeiconsIcon icon={PlayIcon} size={22} color="#fff" strokeWidth={2} />
-          </View>
-        </View>
-      </Pressable>
-    );
-  }
-
-  // Generic file
-  const fg = isMe ? tone.accentForeground : tone.foreground;
-  const subFg = isMe ? tone.accentForeground + 'B8' : tone.muted;
-  const surface = isMe ? 'rgba(255,255,255,0.18)' : tone.background;
-  const border = isMe ? 'rgba(255,255,255,0.12)' : tone.border;
-  return (
-    <Pressable onPress={handlePress} style={[styles.attFile, { backgroundColor: surface, borderColor: border }]}>
-      <View style={[styles.attFileIcon, { backgroundColor: isMe ? 'rgba(255,255,255,0.15)' : tone.surface }]}>
-        <HugeiconsIcon icon={File01Icon} size={18} color={isMe ? '#fff' : tone.accent} strokeWidth={1.7} />
-      </View>
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={[styles.attFileName, { color: fg }]} numberOfLines={1}>
-          {att.filename || 'File'}
-        </Text>
-        <Text style={[styles.attFileMeta, { color: subFg }]} numberOfLines={1}>
-          {[fileExt(att.filename ?? ''), formatFileSize(att.sizeBytes)].filter(Boolean).join(' • ')}
-        </Text>
-      </View>
-    </Pressable>
-  );
-}
-
-/* ─── styles ────────────────────────────────────────────────────────────── */
+});
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
+  threadGlow: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 280,
+    zIndex: 0,
+  },
   empty: {
     textAlign: 'center',
     fontSize: SigmaTypo.bodySmall,
   },
-
-  /* Header */
   headerAbs: {
     position: 'absolute',
     top: 0,
@@ -802,7 +879,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    paddingHorizontal: 8,
+    paddingHorizontal: 10,
   },
   iconBtn: {
     width: 36,
@@ -810,11 +887,12 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
+    borderCurve: 'continuous',
   },
   headerTitles: { flex: 1, minWidth: 0 },
   headerTitle: {
     fontSize: SigmaTypo.headline,
-    fontWeight: '700',
+    fontWeight: '800',
     letterSpacing: 0.1,
   },
   headerSubtitle: {
@@ -823,30 +901,58 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   headerGroupAvatar: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
+    width: 36,
+    height: 36,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },
   headerPeerAvatar: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  headerPeerInitials: { color: '#fff', fontWeight: '700', fontSize: 13 },
-
-  /* Empty state */
+  headerPeerInitials: { color: '#fff', fontWeight: '800', fontSize: 13 },
   listEmpty: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 60,
+    paddingVertical: 80,
+    paddingHorizontal: 24,
   },
-  listEmptyText: { fontSize: SigmaTypo.bodySmall },
-
-  /* Bubbles */
+  listEmptyTitle: {
+    marginTop: 12,
+    fontSize: SigmaTypo.bodySmall,
+    fontWeight: '600',
+    textAlign: 'center',
+    lineHeight: 20,
+    maxWidth: 260,
+  },
+  dayRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginVertical: 10,
+  },
+  dayLine: {
+    flex: 1,
+    height: StyleSheet.hairlineWidth,
+  },
+  dayPill: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderCurve: 'continuous',
+  },
+  dayText: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+    textTransform: 'capitalize',
+  },
   bubbleRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
@@ -863,163 +969,32 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  msgAvatarInitials: { color: '#fff', fontSize: 11, fontWeight: '700' },
-
+  msgAvatarInitials: { color: '#fff', fontSize: 11, fontWeight: '800' },
   bubble: {
     maxWidth: '78%',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     gap: 4,
   },
   bubbleText: {
     fontSize: SigmaTypo.bodySmall + 1,
-    lineHeight: 20,
+    lineHeight: 21,
     fontWeight: '500',
   },
   bubbleTime: {
     fontSize: 10,
-    fontWeight: '500',
+    fontWeight: '600',
     alignSelf: 'flex-end',
     fontVariant: ['tabular-nums'],
-  },
-
-  /* Attachments */
-  attImageWrap: {
-    width: 220,
-    height: 160,
-    borderRadius: 14,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(0,0,0,0.06)',
-  },
-  attImage: {
-    width: '100%',
-    height: '100%',
-  },
-  attMediaPlaceholder: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 12,
-  },
-  attMediaPlaceholderText: {
-    fontSize: 11,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
-  attVideoOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.25)',
-  },
-  attPlayBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.55)',
-  },
-  attFile: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    minWidth: 200,
-    maxWidth: 260,
-  },
-  attFileIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  attFileName: {
-    fontSize: SigmaTypo.captionSmall + 1,
-    fontWeight: '700',
-  },
-  attFileMeta: {
     marginTop: 2,
-    fontSize: 10,
-    fontWeight: '500',
-    letterSpacing: 0.3,
   },
-
-  /* Floating input */
-  floatingHost: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-  },
-  pillOuter: {
-    width: '100%',
-  },
-  pillTopBorder: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    height: StyleSheet.hairlineWidth,
-  },
-  pillRow: {
-    paddingHorizontal: IOS_GLASS ? 2 : 10,
-  },
-  pill: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
+  attachmentsCol: {
+    alignSelf: 'flex-start',
+    alignItems: 'flex-start',
     gap: 6,
-    borderRadius: 28,
-    paddingLeft: 18,
-    paddingRight: 5,
-    paddingVertical: 5,
-    minHeight: 44,
-    overflow: 'hidden',
-    ...Platform.select({
-      ios: IOS_GLASS
-        ? {
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: 8 },
-          shadowOpacity: 0.18,
-          shadowRadius: 20,
-        }
-        : {
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: 2 },
-          shadowOpacity: 0.06,
-          shadowRadius: 6,
-        },
-      android: {
-        elevation: 4,
-      },
-    }),
-  },
-  pillInput: {
-    flex: 1,
-    fontSize: SigmaTypo.bodySmall + 1,
-    lineHeight: 20,
-    paddingVertical: 9,
-    maxHeight: 120,
-  },
-  sendWrap: {
-    width: 38,
-    height: 38,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sendBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: '100%',
   },
 });
 
-/* Unused keeping */
-const _radiusRef = SigmaRadius; // keep ref so tree-shaking doesn't complain
+const _radiusRef = SigmaRadius;
 void _radiusRef;

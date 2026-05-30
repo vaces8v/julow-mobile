@@ -1,41 +1,32 @@
+import { HeaderBlurBackground } from '@/components/header-blur-background';
 import { ThemedText } from '@/components/themed-text';
-import { BlurView } from 'expo-blur';
 import React from 'react';
-import { Platform, StyleSheet, useColorScheme, View } from 'react-native';
+import { StyleSheet, useColorScheme, View, type View as RNView, type RefObject } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export function ScreenHeader({
   title,
   subtitle,
   right,
+  blurTargetRef,
 }: {
   title: string;
   subtitle?: React.ReactNode;
   right?: React.ReactNode;
+  blurTargetRef?: RefObject<RNView | null>;
 }) {
   const isDark = useColorScheme() === 'dark';
   const insets = useSafeAreaInsets();
 
   return (
     <View style={[styles.container, { paddingTop: insets.top + 8 }]}>
-      <BlurView
-        tint={isDark ? 'dark' : 'light'}
-        intensity={30}
-        style={[
-          StyleSheet.absoluteFill,
-          {
-            backgroundColor: isDark
-              ? 'rgba(0,0,0,0.6)'
-              : 'rgba(255,255,255,0.7)',
-            display: Platform.OS === 'android' ? 'none' : 'flex',
-          },
-        ]}
-      />
-      {Platform.OS === 'android' && (
+      {blurTargetRef ? (
+        <HeaderBlurBackground blurTargetRef={blurTargetRef} />
+      ) : (
         <View
           style={[
             StyleSheet.absoluteFill,
-            { backgroundColor: isDark ? '#000000' : '#ffffff' },
+            { backgroundColor: isDark ? 'rgba(28,28,31,0.78)' : 'rgba(255,255,255,0.78)' },
           ]}
         />
       )}

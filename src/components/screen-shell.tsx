@@ -1,11 +1,12 @@
+import { HeaderBlurBackground } from '@/components/header-blur-background';
 import { useSemanticTheme } from '@/hooks/use-semantic-theme';
 import { SigmaTypo } from '@/constants/sigma';
 import { ArrowLeft01Icon } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react-native';
-import { BlurTargetView, BlurView } from 'expo-blur';
+import { BlurTargetView } from 'expo-blur';
 import { router } from 'expo-router';
 import React, { useRef } from 'react';
-import { Dimensions, Platform, Pressable, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { Dimensions, Pressable, StatusBar, StyleSheet, Text, View } from 'react-native';
 import Animated, {
   Extrapolation,
   interpolate,
@@ -66,14 +67,7 @@ export function ScreenShell({ title, subtitle, right, children, back = true, con
 
       <View style={[styles.fixedHeader, { height: HEADER_H, paddingTop: insets.top }]} pointerEvents="box-none">
         <Animated.View style={[StyleSheet.absoluteFill, headerBgStyle]} pointerEvents="none">
-          <BlurView
-            blurTarget={blurTargetRef}
-            blurMethod={Platform.OS === 'android' ? 'dimezisBlurViewSdk31Plus' : undefined}
-            intensity={c.scheme === 'dark' ? 60 : 70}
-            tint={c.scheme === 'dark' ? 'dark' : 'prominent'}
-            blurReductionFactor={Platform.OS === 'android' ? 0.5 : 1}
-            style={StyleSheet.absoluteFill}
-          />
+          <HeaderBlurBackground blurTargetRef={blurTargetRef} />
           <View style={[styles.headerBorder, { backgroundColor: c.border }]} />
         </Animated.View>
 
@@ -95,7 +89,7 @@ export function ScreenShell({ title, subtitle, right, children, back = true, con
         </View>
       </View>
 
-      <BlurTargetView ref={blurTargetRef} style={StyleSheet.absoluteFill}>
+      <BlurTargetView ref={blurTargetRef} style={StyleSheet.absoluteFill} collapsable={false}>
         <Animated.ScrollView
           onScroll={scrollHandler}
           scrollEventThrottle={16}

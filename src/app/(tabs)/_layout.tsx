@@ -1,6 +1,7 @@
 import { ThemedText } from '@/components/themed-text';
 import { BlurContext } from '@/contexts/blur-context';
 import { useSemanticTheme } from '@/hooks/use-semantic-theme';
+import { useI18n } from '@/i18n/context';
 import {
   BubbleChatIcon,
   Folder02Icon,
@@ -18,12 +19,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const IS_IOS_26 = Platform.OS === 'ios' && parseInt(String(Platform.Version), 10) >= 26;
 
-const tabs = [
-  { name: 'index', label: 'Главная', icon: Home09Icon },
-  { name: 'projects', label: 'Проекты', icon: Folder02Icon },
-  { name: 'chats', label: 'Чаты', icon: BubbleChatIcon },
-  { name: 'search', label: 'Поиск', icon: Search01Icon },
-  { name: 'settings', label: 'Настройки', icon: Settings02Icon },
+export const unstable_settings = {
+  initialRouteName: '(home)',
+};
+
+const TAB_ICONS = [
+  { name: 'index', key: 'home' as const, icon: Home09Icon },
+  { name: 'projects', key: 'projects' as const, icon: Folder02Icon },
+  { name: 'chats', key: 'chats' as const, icon: BubbleChatIcon },
+  { name: 'search', key: 'search' as const, icon: Search01Icon },
+  { name: 'settings', key: 'settings' as const, icon: Settings02Icon },
 ];
 
 function TabButton({
@@ -46,37 +51,40 @@ function TabButton({
 }
 
 function NativeTabLayout() {
+  const { t } = useI18n();
+  const tabs = t.tabs;
+
   return (
     <NativeTabs minimizeBehavior="never">
       <NativeTabs.Trigger
         name="(home)"
         listeners={{ tabPress: () => DeviceEventEmitter.emit('tabPress', '(home)') }}>
-        <NativeTabs.Trigger.Label>Главная</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Label>{tabs.home}</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon sf={{ default: 'house', selected: 'house.fill' }} md="home" />
       </NativeTabs.Trigger>
       <NativeTabs.Trigger
         name="(projects)"
         listeners={{ tabPress: () => DeviceEventEmitter.emit('tabPress', '(projects)') }}>
-        <NativeTabs.Trigger.Label>Проекты</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Label>{tabs.projects}</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon sf={{ default: 'folder', selected: 'folder.fill' }} md="folder" />
       </NativeTabs.Trigger>
       <NativeTabs.Trigger
         name="(chats)"
         listeners={{ tabPress: () => DeviceEventEmitter.emit('tabPress', '(chats)') }}>
-        <NativeTabs.Trigger.Label>Чаты</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Label>{tabs.chats}</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon sf={{ default: 'bubble.left.and.bubble.right', selected: 'bubble.left.and.bubble.right.fill' }} md="chat_bubble" />
       </NativeTabs.Trigger>
       <NativeTabs.Trigger
         name="(settings)"
         listeners={{ tabPress: () => DeviceEventEmitter.emit('tabPress', '(settings)') }}>
-        <NativeTabs.Trigger.Label>Настройки</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Label>{tabs.settings}</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon sf={{ default: 'gearshape', selected: 'gearshape.fill' }} md="settings" />
       </NativeTabs.Trigger>
       <NativeTabs.Trigger
         role="search"
         name="(search)"
         listeners={{ tabPress: () => DeviceEventEmitter.emit('tabPress', '(search)') }}>
-        <NativeTabs.Trigger.Label>Поиск</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Label>{tabs.search}</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon sf={{ default: 'magnifyingglass', selected: 'magnifyingglass' }} md="search" />
       </NativeTabs.Trigger>
     </NativeTabs>
@@ -88,10 +96,21 @@ function BlurTabLayout() {
   const router = useRouter();
   const scheme = useColorScheme();
   const isDark = scheme === 'dark';
-  const t = useSemanticTheme();
+  const theme = useSemanticTheme();
+  const { t: i18n } = useI18n();
+  const tabs = useMemo(
+    () =>
+      TAB_ICONS.map((tab) => ({
+        ...tab,
+        label: i18n.tabs[tab.key],
+      })),
+    [i18n.tabs],
+  );
   const blurTargetRef = useRef<View>(null);
   const insets = useSafeAreaInsets();
   const blurContextValue = useMemo(() => ({ blurTargetRef }), []);
+  const tabBarHeight = 56 + (insets.bottom > 0 ? insets.bottom : 10);
+  const isAndroid = Platform.OS === 'android';
 
   const getTabSegment = (name: string) => {
     return name === 'index' ? '(home)' : `(${name})`;
@@ -102,66 +121,88 @@ function BlurTabLayout() {
     return segments.includes(segment as never);
   };
 
+  const tabBarContent = (
+    <View style={[styles.tabBar, { paddingBottom: insets.bottom > 0 ? insets.bottom : 10 }]}>
+      {tabs.map((tab) => {
+        const focused = isTabFocused(tab.name);
+        const color = focused ? theme.foreground : theme.muted;
+
+        return (
+          <TabButton
+            key={tab.name}
+            focused={focused}
+            onPress={() => {
+              const screenName = getTabSegment(tab.name);
+              if (focused) {
+                DeviceEventEmitter.emit('tabPress', screenName);
+              } else {
+                router.navigate(`/(tabs)/${screenName}` as Href);
+              }
+            }}
+            label={tab.label}>
+            <HugeiconsIcon
+              icon={tab.icon}
+              size={22}
+              color={color}
+              strokeWidth={focused ? 2 : 1.5}
+            />
+            <ThemedText style={[styles.tabLabel, { color, fontWeight: focused ? '600' : '400' }]}>
+              {tab.label}
+            </ThemedText>
+          </TabButton>
+        );
+      })}
+    </View>
+  );
+
+  const tabsContent = (
+    <Tabs
+      initialRouteName="(home)"
+      screenOptions={{
+        headerShown: false,
+        tabBarStyle: { display: 'none' },
+      }}>
+      <Tabs.Screen name="(home)" />
+      <Tabs.Screen name="(projects)" />
+      <Tabs.Screen name="(chats)" />
+      <Tabs.Screen name="(search)" />
+      <Tabs.Screen name="(settings)" />
+    </Tabs>
+  );
+
   return (
     <BlurContext.Provider value={blurContextValue}>
       <View style={styles.container}>
-        <BlurTargetView ref={blurTargetRef} style={StyleSheet.absoluteFill}>
-          <Tabs
-            screenOptions={{
-              headerShown: false,
-              tabBarStyle: { display: 'none' },
-            }}>
-            <Tabs.Screen name="(home)" />
-            <Tabs.Screen name="(projects)" />
-            <Tabs.Screen name="(chats)" />
-            <Tabs.Screen name="(search)" />
-            <Tabs.Screen name="(settings)" />
-          </Tabs>
-        </BlurTargetView>
+        {isAndroid ? (
+          <View style={StyleSheet.absoluteFill}>{tabsContent}</View>
+        ) : (
+          <BlurTargetView ref={blurTargetRef} style={StyleSheet.absoluteFill} collapsable={false}>
+            {tabsContent}
+          </BlurTargetView>
+        )}
 
-        <BlurView
-          blurTarget={blurTargetRef}
-          blurMethod="dimezisBlurViewSdk31Plus"
-          intensity={isDark ? 20 : 30}
-          tint={isDark ? 'dark' : 'prominent'}
-          blurReductionFactor={0.5}
-          style={[
-            styles.blurContainer,
-            isDark && styles.blurContainerDark,
-            { height: 56 + (insets.bottom > 0 ? insets.bottom : 10) },
-          ]}>
-          <View style={[styles.tabBar, { paddingBottom: insets.bottom > 0 ? insets.bottom : 10 }]}>
-            {tabs.map((tab) => {
-              const focused = isTabFocused(tab.name);
-              const color = focused ? t.foreground : t.muted;
-
-              return (
-                <TabButton
-                  key={tab.name}
-                  focused={focused}
-                  onPress={() => {
-                    const screenName = getTabSegment(tab.name);
-                    if (focused) {
-                      DeviceEventEmitter.emit('tabPress', screenName);
-                    } else {
-                      router.navigate(`/(tabs)/${screenName}` as Href);
-                    }
-                  }}
-                  label={tab.label}>
-                  <HugeiconsIcon
-                    icon={tab.icon}
-                    size={22}
-                    color={color}
-                    strokeWidth={focused ? 2 : 1.5}
-                  />
-                  <ThemedText style={[styles.tabLabel, { color, fontWeight: focused ? '600' : '400' }]}>
-                    {tab.label}
-                  </ThemedText>
-                </TabButton>
-              );
-            })}
+        {isAndroid ? (
+          <View
+            style={[
+              styles.blurContainer,
+              { height: tabBarHeight, backgroundColor: theme.surface },
+            ]}>
+            {tabBarContent}
           </View>
-        </BlurView>
+        ) : (
+          <BlurView
+            blurTarget={blurTargetRef}
+            intensity={isDark ? 20 : 30}
+            tint={isDark ? 'dark' : 'prominent'}
+            blurReductionFactor={0.5}
+            style={[
+              styles.blurContainer,
+              isDark && styles.blurContainerDark,
+              { height: tabBarHeight },
+            ]}>
+            {tabBarContent}
+          </BlurView>
+        )}
       </View>
     </BlurContext.Provider>
   );

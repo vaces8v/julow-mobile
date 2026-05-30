@@ -10,9 +10,11 @@ import {
   apiPost,
   apiPatch,
   apiDelete,
+  apiPostMultipart,
   getAccessToken,
   ApiError,
 } from './api-client';
+import { buildUploadFormData } from './build-upload-form-data';
 
 /**
  * The backend is currently configured with `S3_ENDPOINT_URL=http://minio:9000`
@@ -59,6 +61,12 @@ export const WEB_BASE_URL =
  */
 export function buildFileContentUrl(fileId: string): string {
   return `${WEB_BASE_URL.replace(/\/$/, '')}/api/proxy/files/${fileId}/content`;
+}
+
+/** Stream file bytes directly from the mobile API (Bearer-authed). */
+export function buildDirectFileContentUrl(fileId: string): string {
+  const base = API_BASE_URL.replace(/\/$/, '');
+  return `${base}/files/${encodeURIComponent(fileId)}/content`;
 }
 
 export function rewriteStorageUrl(url: string | undefined | null): string | undefined {
@@ -354,6 +362,7 @@ export interface UserPayload {
 export interface ProfilePayload {
   id: string;
   userId: string;
+  displayName?: string;
   avatarUrl?: string;
   bio?: string;
   jobTitle?: string;
@@ -1073,6 +1082,7 @@ export const api = {
     type BackendProfile = {
       id: string;
       user_id: string;
+      display_name?: string | null;
       avatar_url?: string | null;
       bio?: string | null;
       job_title?: string | null;
@@ -1083,6 +1093,7 @@ export const api = {
     return {
       id: res.data.id,
       userId: res.data.user_id,
+      displayName: res.data.display_name ?? undefined,
       avatarUrl: res.data.avatar_url ?? undefined,
       bio: res.data.bio ?? undefined,
       jobTitle: res.data.job_title ?? undefined,
@@ -1092,10 +1103,12 @@ export const api = {
   },
 
   updatePersonalInfo: async (payload: {
+    displayName?: string;
     bio?: string;
     jobTitle?: string;
   }): Promise<void> => {
     const body: Record<string, unknown> = {};
+    if (payload.displayName !== undefined) body.display_name = payload.displayName;
     if (payload.bio !== undefined) body.bio = payload.bio;
     if (payload.jobTitle !== undefined) body.job_title = payload.jobTitle;
     await apiPatch('/profile/me/personal-info', body);
@@ -1641,6 +1654,34 @@ export const api = {
     await apiDelete(`/comments/${commentId}`);
   },
 
+  addCommentAttachment: async (
+    commentId: string,
+    file: { uri: string; name: string; mimeType?: string | null },
+    attachmentType: 'image' | 'video' | 'file' | 'link' | 'voice' = 'file',
+  ): Promise<CommentAttachmentShape> => {
+    const form = buildUploadFormData(file, { attachment_type: attachmentType });
+    const res = await apiPostMultipart<{
+      id: string;
+      file_id: string;
+      url?: string | null;
+      attachment_type?: string | null;
+      name?: string | null;
+      size_bytes?: number | null;
+      preview_url?: string | null;
+      created_at?: string | null;
+    }>(`/comments/${commentId}/attachments`, form);
+    return {
+      id: res.data.id,
+      fileId: res.data.file_id,
+      url: res.data.url ?? undefined,
+      attachmentType: res.data.attachment_type ?? undefined,
+      name: res.data.name ?? undefined,
+      sizeBytes: res.data.size_bytes ?? undefined,
+      previewUrl: res.data.preview_url ?? undefined,
+      createdAt: res.data.created_at ?? undefined,
+    };
+  },
+
   // ── Sprints ────────────────────────────────────────────────────
   getSprints: async (workspaceId: string, projectId: string): Promise<SprintPayload[]> => {
     const res = await apiGet<BackendSprint[]>(
@@ -1830,6 +1871,35 @@ export const api = {
     return mapMessage(res.data);
   },
 
+  addMessageAttachment: async (
+    messageId: string,
+    file: { uri: string; name: string; mimeType?: string | null },
+    attachmentType: 'image' | 'video' | 'file' | 'link' | 'voice' = 'file',
+  ): Promise<MessageAttachmentShape> => {
+    const form = buildUploadFormData(file, { attachment_type: attachmentType });
+    const res = await apiPostMultipart<{
+      id: string;
+      file_id: string;
+      name?: string | null;
+      filename?: string | null;
+      size_bytes?: number | null;
+      attachment_type?: string | null;
+      mime_type?: string | null;
+      url?: string | null;
+      preview_url?: string | null;
+    }>(`/messages/${messageId}/attachments`, form);
+    return {
+      id: res.data.id,
+      fileId: res.data.file_id,
+      filename: res.data.name ?? res.data.filename ?? file.name,
+      sizeBytes: res.data.size_bytes ?? undefined,
+      mimeType:
+        res.data.mime_type ?? attachmentTypeToMime(res.data.attachment_type) ?? file.mimeType ?? undefined,
+      url: res.data.url ?? undefined,
+      previewUrl: res.data.preview_url ?? undefined,
+    };
+  },
+
   updateMessage: async (messageId: string, payload: { content: string; contentFormat?: string }): Promise<void> => {
     await apiPatch(`/messages/${messageId}`, {
       content: payload.content,
@@ -1878,11 +1948,13 @@ export const api = {
     projectId?: string;
     participantIds?: string[];
     agenda?: string[];
+    conferenceProvider?: string;
   }): Promise<MeetingPayload> => {
     const res = await apiPost<BackendMeeting>('/meetings/', {
       title: payload.title,
       description: payload.description,
-      meeting_type: payload.meetingType ?? 'sync',
+      meeting_type: payload.meetingType ?? 'video_call',
+      conference_provider: payload.conferenceProvider ?? 'internal',
       workspace_id: payload.workspaceId,
       project_id: payload.projectId,
       scheduled_at: payload.scheduledAt,

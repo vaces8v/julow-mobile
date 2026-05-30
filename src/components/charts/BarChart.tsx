@@ -48,9 +48,13 @@ export function BarChart({
 
   const progress = useSharedValue(animate ? 0 : 1);
   useEffect(() => {
+    if (!animate) {
+      progress.value = 1;
+      return;
+    }
     progress.value = 0;
     progress.value = withDelay(80, withTiming(1, { duration: 700 }));
-  }, [progress, data.length]);
+  }, [animate, progress, data.length]);
 
   const growStyle = useAnimatedStyle(() => ({
     transform: [{ scaleY: progress.value }],
@@ -96,7 +100,7 @@ export function BarChart({
           <Canvas style={StyleSheet.absoluteFill}>
             {showGrid &&
               gridLines.map((y, i) => (
-                <Line key={`g${i}`} p1={vec(padL, y)} p2={vec(padL + chartW, y)} color={c.border} strokeWidth={StyleSheet.hairlineWidth} />
+                <Line key={`g${i}`} p1={vec(padL, y)} p2={vec(padL + chartW, y)} color={c.separator} strokeWidth={StyleSheet.hairlineWidth} />
               ))}
 
             {showLabels &&
@@ -113,8 +117,8 @@ export function BarChart({
           <Animated.View style={[StyleSheet.absoluteFill, { transformOrigin: 'bottom' as any }, growStyle]} pointerEvents="none">
             <Canvas style={StyleSheet.absoluteFill}>
               {bars.map((b, i) => (
-                <RoundedRect key={i} x={b.x} y={b.y} width={b.w} height={b.h} r={4}>
-                  <LinearGradient start={vec(b.x, b.y)} end={vec(b.x, b.y + b.h)} colors={[b.color, b.color + 'BB']} />
+                <RoundedRect key={i} x={b.x} y={b.y} width={b.w} height={b.h} r={6}>
+                  <LinearGradient start={vec(b.x, b.y)} end={vec(b.x, b.y + b.h)} colors={[b.color, b.color + '55']} />
                 </RoundedRect>
               ))}
             </Canvas>

@@ -31,7 +31,7 @@ import {
 import { HugeiconsIcon } from '@hugeicons/react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { useEffect, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
@@ -40,6 +40,8 @@ import Animated, {
 } from 'react-native-reanimated';
 
 type Tab = 'overview' | 'sprints' | 'team' | 'flow';
+
+const CHART_ANIMATE = Platform.OS !== 'android';
 
 const ACCENT_BLUE = '#3b82f6';
 const ACCENT_VIOLET = '#8b5cf6';
@@ -188,6 +190,7 @@ function OverviewTab({ ins, donutData, catColors, catLabels, insights }: {
             ]}
             height={180}
             legend
+            animate={CHART_ANIMATE}
           />
         </SectionCard>
       </Fade>
@@ -202,6 +205,7 @@ function OverviewTab({ ins, donutData, catColors, catLabels, insights }: {
               thickness={20}
               centerValue="100%"
               centerLabel={ins.tasks}
+              animate={CHART_ANIMATE}
             />
             <View style={styles.legendColumn}>
               {donutData.map((d) => (
@@ -229,6 +233,7 @@ function OverviewTab({ ins, donutData, catColors, catLabels, insights }: {
             ]}
             height={180}
             legend
+            animate={CHART_ANIMATE}
           />
         </SectionCard>
       </Fade>
@@ -266,6 +271,7 @@ function SprintsTab({ ins }: { ins: any }) {
             ]}
             height={200}
             legend
+            animate={CHART_ANIMATE}
           />
         </SectionCard>
       </Fade>
@@ -280,6 +286,7 @@ function SprintsTab({ ins }: { ins: any }) {
             ]}
             height={180}
             legend
+            animate={CHART_ANIMATE}
           />
         </SectionCard>
       </Fade>
@@ -300,6 +307,7 @@ function TeamTab({ ins }: { ins: any }) {
             data={MOCK_TEAM.map(m => ({ label: m.name.split(' ')[0], value: m.done, color: ACCENT_VIOLET }))}
             height={180}
             showGrid
+            animate={CHART_ANIMATE}
           />
         </SectionCard>
       </Fade>

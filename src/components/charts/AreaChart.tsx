@@ -1,6 +1,7 @@
 import { useSemanticTheme } from '@/hooks/use-semantic-theme';
 import {
   Canvas,
+  Circle,
   Group,
   Line,
   LinearGradient,
@@ -31,7 +32,7 @@ type Props = {
 };
 
 const fontFamily = Platform.select({ ios: 'Helvetica', default: 'sans-serif' });
-const font = matchFont({ fontFamily, fontSize: 10, fontWeight: 'normal' });
+const font = matchFont({ fontFamily, fontSize: 10, fontWeight: '500' });
 
 function buildPath(points: { x: number; y: number }[]) {
   if (points.length === 0) return Skia.Path.Make();
@@ -69,15 +70,22 @@ export function AreaChart({
 
   const padL = showLabels ? 30 : 8;
   const padR = 8;
-  const padT = 10;
-  const padB = showLabels ? 18 : 6;
+  const padT = 12;
+  const padB = showLabels ? 20 : 6;
 
   const chartW = Math.max(0, w - padL - padR);
   const chartH = Math.max(0, height - padT - padB);
 
-  const { pathArea, pathLine, gridLines, xLabels, yLabels } = useMemo(() => {
+  const { pathArea, pathLine, gridLines, xLabels, yLabels, dots } = useMemo(() => {
     if (!w || data.length === 0) {
-      return { pathArea: Skia.Path.Make(), pathLine: Skia.Path.Make(), gridLines: [], xLabels: [], yLabels: [] };
+      return {
+        pathArea: Skia.Path.Make(),
+        pathLine: Skia.Path.Make(),
+        gridLines: [],
+        xLabels: [],
+        yLabels: [],
+        dots: [],
+      };
     }
     const vals = data.map((d) => d.value);
     const min = Math.min(...vals, 0);
@@ -109,7 +117,7 @@ export function AreaChart({
       return { y: padT + (chartH / (yCount - 1)) * i, label: v.toFixed(v >= 10 ? 0 : 1) };
     });
 
-    return { pathArea: area, pathLine: line, gridLines: grid, xLabels: xl, yLabels: yl };
+    return { pathArea: area, pathLine: line, gridLines: grid, xLabels: xl, yLabels: yl, dots: pts };
   }, [data, w, chartW, chartH, padL, padT]);
 
   return (
@@ -118,7 +126,14 @@ export function AreaChart({
         <Canvas style={StyleSheet.absoluteFill}>
           {showGrid &&
             gridLines.map((y, i) => (
-              <Line key={i} p1={vec(padL, y)} p2={vec(padL + chartW, y)} color={c.border} strokeWidth={StyleSheet.hairlineWidth} />
+              <Line
+                key={i}
+                p1={vec(padL, y)}
+                p2={vec(padL + chartW, y)}
+                color={c.separator}
+                strokeWidth={StyleSheet.hairlineWidth}
+                opacity={0.9}
+              />
             ))}
 
           {showLabels &&
@@ -128,10 +143,23 @@ export function AreaChart({
 
           <Group>
             <Path path={pathArea}>
-              <LinearGradient start={vec(0, padT)} end={vec(0, padT + chartH)} colors={[stroke + '55', stroke + '00']} />
+              <LinearGradient
+                start={vec(0, padT)}
+                end={vec(0, padT + chartH)}
+                colors={[stroke + '66', stroke + '12', stroke + '00']}
+              />
             </Path>
-            <Path path={pathLine} style="stroke" strokeWidth={2.4} color={stroke} strokeCap="round" strokeJoin="round" />
+            <Path path={pathLine} style="stroke" strokeWidth={5} color={stroke + '33'} strokeCap="round" strokeJoin="round" />
+            <Path path={pathLine} style="stroke" strokeWidth={2.6} color={stroke} strokeCap="round" strokeJoin="round" />
           </Group>
+
+          {dots.map((pt, i) => (
+            <Group key={`dot-${i}`}>
+              <Circle cx={pt.x} cy={pt.y} r={5} color={stroke + '33'} />
+              <Circle cx={pt.x} cy={pt.y} r={2.8} color={stroke} />
+              <Circle cx={pt.x} cy={pt.y} r={1.2} color="#ffffff" opacity={0.85} />
+            </Group>
+          ))}
 
           {showLabels &&
             xLabels.map((xl, i) => (

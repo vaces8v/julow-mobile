@@ -69,7 +69,7 @@ export type SemanticTheme = {
 
 export function useSemanticTheme(): SemanticTheme {
   const colorScheme = useColorScheme();
-  const scheme = colorScheme === 'dark' ? 'dark' : 'light';
+  const scheme = colorScheme === 'light' ? 'light' : 'dark';
   const fb = THEME_FALLBACK[scheme];
 
   const vars = useCSSVariable([

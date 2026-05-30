@@ -16,29 +16,44 @@ type Props = {
   thickness?: number;
   centerLabel?: string;
   centerValue?: string;
+  animate?: boolean;
 };
 
-export function DonutChart({ data, size = 160, thickness = 16, centerLabel, centerValue }: Props) {
+export function DonutChart({
+  data,
+  size = 160,
+  thickness = 16,
+  centerLabel,
+  centerValue,
+  animate = true,
+}: Props) {
   const c = useSemanticTheme();
   const total = data.reduce((s, d) => s + d.value, 0) || 1;
   const r = (size - thickness) / 2;
   const cx = size / 2;
   const cy = size / 2;
 
-  const progress = useSharedValue(0);
+  const progress = useSharedValue(animate ? 0 : 1);
   useEffect(() => {
+    if (!animate) {
+      progress.value = 1;
+      return;
+    }
     progress.value = 0;
     progress.value = withTiming(1, { duration: 900 });
-  }, [progress, data]);
+  }, [animate, progress, data]);
 
   const animatedStyle = useAnimatedStyle(() => ({ opacity: progress.value }));
 
   const arcs = useMemo(() => {
-    let start = -Math.PI / 2;
-    return data.map((d) => {
+    const result = data.reduce<{
+      start: number;
+      arcs: { path: ReturnType<typeof Skia.Path.Make>; color: string }[];
+    }>((acc, d) => {
+      const start = acc.start;
       const sweep = (d.value / total) * Math.PI * 2;
       const end = start + sweep;
-      const largeArc = sweep > Math.PI ? 1 : 0;
+      const useSmallArc = sweep <= Math.PI;
       const x1 = cx + r * Math.cos(start);
       const y1 = cy + r * Math.sin(start);
       const x2 = cx + r * Math.cos(end);
@@ -46,12 +61,13 @@ export function DonutChart({ data, size = 160, thickness = 16, centerLabel, cent
 
       const path = Skia.Path.Make();
       path.moveTo(x1, y1);
-      path.arcToRotated(r, r, 0, largeArc as 0 | 1, 1, x2, y2);
+      path.arcToRotated(r, r, 0, useSmallArc, false, x2, y2);
 
-      const out = { path, color: d.color };
-      start = end;
-      return out;
-    });
+      acc.arcs.push({ path, color: d.color });
+      return { start: end, arcs: acc.arcs };
+    }, { start: -Math.PI / 2, arcs: [] });
+
+    return result.arcs;
   }, [data, total, r, cx, cy]);
 
   return (

@@ -103,9 +103,16 @@ export default function TodayScreen() {
 
   useEffect(() => {
     if (!dayState?.myStandUp) return;
-    setSuY(dayState.myStandUp.yesterday);
-    setSuT(dayState.myStandUp.today);
-    setSuB(dayState.myStandUp.blockers);
+    const nextStandUp = dayState.myStandUp;
+    const timeoutId = setTimeout(() => {
+      setSuY(nextStandUp.yesterday);
+      setSuT(nextStandUp.today);
+      setSuB(nextStandUp.blockers);
+    }, 0);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
   }, [dayState?.myStandUp]);
 
   const patch = useCallback(
@@ -213,7 +220,7 @@ export default function TodayScreen() {
     if (session.segmentStartedAt != null) {
       setTimerSession(pauseSession(session, now));
     } else {
-      setTimerSession({ ...session, segmentStartedAt: Date.now() });
+      setTimerSession({ ...session, segmentStartedAt: now });
     }
   };
 
@@ -221,17 +228,20 @@ export default function TodayScreen() {
 
   useEffect(() => {
     if (!activeWorkspaceId) return;
-    setBundle((prev) => {
-      if (!prev) return prev;
-      const ds = getDayState(prev, dayKey);
-      const s = ds.focusSession;
-      if (!s?.segmentStartedAt) return prev;
-      if (elapsedSeconds(s, tick) < s.targetSeconds - 0.5) return prev;
-      return setDayState(activeWorkspaceId, prev, dayKey, {
-        focusSession: pauseSession(s, tick),
-      });
-    });
-  }, [tick, dayKey, activeWorkspaceId]);
+    if (!bundle) return;
+    const s = getDayState(bundle, dayKey).focusSession;
+    if (!s?.segmentStartedAt) return;
+    if (elapsedSeconds(s, tick) < s.targetSeconds - 0.5) return;
+
+    const pausedSession = pauseSession(s, tick);
+    const timeoutId = setTimeout(() => {
+      setTimerSession(pausedSession);
+    }, 0);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [tick, dayKey, activeWorkspaceId, bundle]);
 
   const timerDisplay = session
     ? formatMmSs(Math.max(0, session.targetSeconds - elapsedSeconds(session, tick)))
