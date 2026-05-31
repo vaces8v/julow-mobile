@@ -1,142 +1,151 @@
-# OAuth и QR-вход JULOW (production)
+# OAuth setup для JULOW (web + mobile)
 
-Пошаговая настройка **Google**, **GitHub**, **Yandex** для веба, мобильного приложения и бэкенда. Один и тот же FastAPI-бэкенд (`julow_backend`) обслуживает оба клиента; отличается только `redirect_uri`.
+Документ описывает единый OAuth flow для `julow-web`, `julow-mobile` и `julow_backend` с HTTPS callback-страницей для мобилки.
 
-## Архитектура
+## 0) Что обязательно помнить
 
-| Клиент | Authorize | Callback `redirect_uri` | Обмен code → JWT |
-|--------|-----------|-------------------------|------------------|
-| **Web** (`julow-web`) | BFF `GET /api/auth/oauth-authorize` → backend | `https://<домен>/oauth/callback` | BFF `POST /api/auth/oauth-login` → cookies |
-| **Mobile** (`julow-mobile`) | `GET /auth/oauth/oauth_{provider}/authorize` | `julowmobile://oauth/callback` | `POST /auth/login/oauth` → SecureStore |
+1. В консоли провайдеров вставляются только redirect URI из списка ниже.
+2. `julowmobile://oauth/callback` не вставляется в Google/GitHub/Yandex. Это внутренний deep link между браузером и приложением.
+3. `redirect_uri` должен совпадать побайтно: в authorize-запросе, в provider console и в code exchange.
 
-Схема приложения: **`julowmobile`** (`app.json` → `expo.scheme`).
+Разрешенные redirect URI:
 
----
-
-## Mobile production APK — plug-and-play после деплоя backend
-
-Когда backend задеплоен с `OAUTH_*` и Redis, **мобильный код менять не нужно**. Остаётся:
-
-### 1. Сборка APK (один раз или при смене URL API)
-
-| Переменная | Где | Значение |
-|------------|-----|----------|
-| `EXPO_PUBLIC_API_BASE_URL` | EAS Secrets / `.env` при `eas build` | `https://backend.julow.ru/api/v1` |
-
-Это **единственная** переменная, нужная мобилке для OAuth. Секреты провайдеров в APK не попадают.
-
-> Опционально только для **Android-эмулятора в dev**: `EXPO_PUBLIC_ANDROID_EMULATOR_API_BASE_URL` — не нужна для release APK.
-
-### 2. Зарегистрировать в консолях провайдеров (точно, побайтно)
-
-Во **всех трёх** консолях добавьте **один и тот же** callback:
-
+```text
+http://localhost:3000/oauth/callback
+https://julow.ru/oauth/callback
+https://julow.ru/oauth/mobile-callback
 ```
+
+Внутренний URI (только для app/browser bridge, НЕ для provider console):
+
+```text
 julowmobile://oauth/callback
 ```
 
-| Провайдер | Где добавить |
-|-----------|--------------|
-| Google | OAuth 2.0 Client → **Authorized redirect URIs** |
-| GitHub | OAuth App → **Authorization callback URL** (один URL на приложение — см. §2) |
-| Yandex | Приложение → **Redirect URI** |
+---
 
-Дополнительно для Google release APK (рекомендуется): Android-клиент с package `com.anonymous.julowmobile` и SHA-1 release keystore — см. §1 п.4.
+## 1) Архитектура flow
 
-### 3. На backend (не в мобилке)
-
-```env
-OAUTH_GOOGLE_CLIENT_ID=...
-OAUTH_GOOGLE_CLIENT_SECRET=...
-OAUTH_GITHUB_CLIENT_ID=...
-OAUTH_GITHUB_CLIENT_SECRET=...
-OAUTH_YANDEX_CLIENT_ID=...
-OAUTH_YANDEX_CLIENT_SECRET=...
-```
-
-### 4. Проверка на устройстве
-
-1. Установить release APK с prod `EXPO_PUBLIC_API_BASE_URL`.
-2. Экран входа → Google / GitHub / Яндекс.
-3. Браузер провайдера → возврат в приложение → главный экран (JWT в SecureStore).
-
-Типичные ошибки: `redirect_uri_mismatch` (URI в консоли ≠ `julowmobile://oauth/callback`), пустой `authorize_url` (нет `OAUTH_*` на backend).
+| Клиент | Запрос authorize | redirect_uri у провайдера | Возврат в приложение |
+|--------|------------------|---------------------------|----------------------|
+| `julow-web` | `GET /api/auth/oauth-authorize` | `http://localhost:3000/oauth/callback` или `https://julow.ru/oauth/callback` | не нужен |
+| `julow-mobile` | `GET /auth/oauth/oauth_{provider}/authorize` | `https://julow.ru/oauth/mobile-callback` | web bridge делает `window.location.replace("julowmobile://oauth/callback?...")` |
 
 ---
 
-## 1. Google Cloud Console
+## 2) Google Cloud Console (клик-за-кликом)
 
-1. [Google Cloud Console](https://console.cloud.google.com/apis/credentials) → **OAuth 2.0 Client ID**.
-2. Тип: **Web application** (тот же client_id/secret, что в backend `.env`).
-3. **Authorized redirect URIs** (все, что реально используются):
+Открыть в браузере:
 
-   | Среда | URI |
-   |-------|-----|
-   | Web dev | `http://localhost:3000/oauth/callback` |
-   | Web prod | `https://app.julow.ru/oauth/callback` |
-   | Mobile (dev + prod) | `julowmobile://oauth/callback` |
+- `https://console.cloud.google.com/apis/credentials`
 
-4. Для **release APK** (рекомендуется дополнительно): клиент типа **Android** с package `com.anonymous.julowmobile` и SHA-1 **release** keystore (EAS credentials / `keytool -list -v -keystore ...`). Web client с custom scheme часто достаточен, если `julowmobile://oauth/callback` добавлен в redirect URIs.
+Пошагово:
 
-5. Скопируйте **Client ID** и **Client Secret** в backend:
+1. Выберите нужный GCP Project в верхнем селекторе проекта.
+2. Перейдите в меню `APIs & Services` → `Credentials`.
+3. Нажмите `+ CREATE CREDENTIALS` → `OAuth client ID`.
+4. В поле `Application type` выберите `Web application` (обязательно).
+5. В блоке `Authorized redirect URIs` нажмите `+ ADD URI` и добавьте по одному:
+   - `http://localhost:3000/oauth/callback`
+   - `https://julow.ru/oauth/callback`
+   - `https://julow.ru/oauth/mobile-callback`
+6. Нажмите `CREATE`.
+7. В модальном окне скопируйте:
+   - `Client ID`
+   - `Client Secret`
+8. Вставьте в `julow_backend/.env`:
 
 ```env
-OAUTH_GOOGLE_CLIENT_ID=...
-OAUTH_GOOGLE_CLIENT_SECRET=...
+OAUTH_GOOGLE_CLIENT_ID=<Client ID из Google>
+OAUTH_GOOGLE_CLIENT_SECRET=<Client Secret из Google>
 ```
+
+Что нельзя вставлять в Google:
+
+- `julowmobile://oauth/callback` (это не web redirect URI и приведет к mismatch).
 
 ---
 
-## 2. GitHub OAuth App
+## 3) GitHub OAuth App (клик-за-кликом)
 
-1. [GitHub → Developer settings → OAuth Apps](https://github.com/settings/developers) → **New OAuth App**.
-2. **Authorization callback URL** — по одному приложению на среду или несколько URL (GitHub — одно поле; для prod укажите основной, для dev — отдельное OAuth App или тот же URL если совпадает):
+Открыть в браузере:
 
-   | Среда | Callback |
-   |-------|----------|
-   | Web dev | `http://localhost:3000/oauth/callback` |
-   | Web prod | `https://app.julow.ru/oauth/callback` |
-   | Mobile | `julowmobile://oauth/callback` |
+- `https://github.com/settings/developers`
 
-   > GitHub допускает только **один** callback URL на приложение. Для dev/prod/mobile часто создают **2–3 OAuth Apps** с одними scopes, либо используют prod URL везде.
+Пошагово:
 
-3. Backend:
+1. В левой панели: `OAuth Apps`.
+2. Нажмите `New OAuth App`.
+3. Заполните поля:
+   - `Application name`: например `Julow OAuth (prod web)` или `Julow OAuth (mobile bridge)`
+   - `Homepage URL`: `https://julow.ru`
+   - `Authorization callback URL`: один callback URL для этого приложения
+4. Нажмите `Register application`.
+5. В карточке приложения нажмите `Generate a new client secret`.
+6. Скопируйте:
+   - `Client ID`
+   - `Client secret`
+7. Вставьте в `julow_backend/.env`:
 
 ```env
-OAUTH_GITHUB_CLIENT_ID=...
-OAUTH_GITHUB_CLIENT_SECRET=...
+OAUTH_GITHUB_CLIENT_ID=<Client ID из GitHub OAuth App>
+OAUTH_GITHUB_CLIENT_SECRET=<Client Secret из GitHub OAuth App>
 ```
+
+Ограничение GitHub по callback URL:
+
+- В классическом `OAuth App` GitHub обычно использует одно поле `Authorization callback URL`.
+- Если вам нужны разные redirect URI (dev/web/mobile), рекомендуемый вариант: отдельные OAuth Apps для каждой среды/цели:
+  - App 1: `http://localhost:3000/oauth/callback` (dev web)
+  - App 2: `https://julow.ru/oauth/callback` (prod web)
+  - App 3: `https://julow.ru/oauth/mobile-callback` (mobile bridge, если нужен отдельный)
+
+Что нельзя вставлять в GitHub:
+
+- `julowmobile://oauth/callback`.
 
 ---
 
-## 3. Yandex OAuth
+## 4) Yandex OAuth (клик-за-кликом)
 
-1. [oauth.yandex.com](https://oauth.yandex.com/) → создать приложение.
-2. Права: **login:email**, **login:info** (как в backend scope).
-3. **Redirect URI**:
+Открыть в браузере:
 
-   | Среда | URI |
-   |-------|-----|
-   | Web dev | `http://localhost:3000/oauth/callback` |
-   | Web prod | `https://app.julow.ru/oauth/callback` |
-   | Mobile | `julowmobile://oauth/callback` |
+- `https://oauth.yandex.com/client/new`
 
-4. Backend:
+Пошагово:
+
+1. Создайте новое приложение OAuth.
+2. В секции платформ выберите `Web-сервисы` (или `Web services`, если англ. UI).
+3. В поле `Redirect URI` (иногда отображается как `Callback URI`) добавьте:
+   - `http://localhost:3000/oauth/callback`
+   - `https://julow.ru/oauth/callback`
+   - `https://julow.ru/oauth/mobile-callback`
+4. В секции прав (scopes/permissions) включите:
+   - `login:email`
+   - `login:info`
+5. Сохраните приложение и скопируйте:
+   - `Client ID`
+   - `Client Secret`
+6. Вставьте в `julow_backend/.env`:
 
 ```env
-OAUTH_YANDEX_CLIENT_ID=...
-OAUTH_YANDEX_CLIENT_SECRET=...
+OAUTH_YANDEX_CLIENT_ID=<Client ID из Yandex OAuth>
+OAUTH_YANDEX_CLIENT_SECRET=<Client Secret из Yandex OAuth>
 ```
+
+Что нельзя вставлять в Yandex:
+
+- `julowmobile://oauth/callback`.
 
 ---
 
-## 4. Переменные окружения по репозиториям
+## 5) Copy-paste блоки переменных окружения
 
-### `julow_backend` (`.env`)
+### `julow_backend/.env`
 
 ```env
 APP_BASE_URL=https://backend.julow.ru
-FRONTEND_BASE_URL=https://app.julow.ru
+FRONTEND_BASE_URL=https://julow.ru
 
 OAUTH_GOOGLE_CLIENT_ID=
 OAUTH_GOOGLE_CLIENT_SECRET=
@@ -144,86 +153,80 @@ OAUTH_GITHUB_CLIENT_ID=
 OAUTH_GITHUB_CLIENT_SECRET=
 OAUTH_YANDEX_CLIENT_ID=
 OAUTH_YANDEX_CLIENT_SECRET=
-
-REDIS_HOST=...   # обязателен для QR login
 ```
 
-CORS: добавьте origin веб-приложения, например `https://app.julow.ru`.
-
-### `julow-web` (`.env.local` / deploy)
+### `julow-web/.env.local`
 
 ```env
-BACKEND_URL=https://backend.julow.ru/api/v1
 NEXT_PUBLIC_API_BASE_URL=https://backend.julow.ru/api/v1
 NEXT_PUBLIC_WS_BASE_URL=wss://backend.julow.ru
-NEXT_PUBLIC_APP_URL=https://app.julow.ru
+NEXT_PUBLIC_APP_URL=https://julow.ru
 ```
 
-OAuth-секреты **только на backend**; веб ходит через BFF (`/api/auth/oauth-*`).
-
-### `julow-mobile` (`.env` / EAS Secrets)
+### `julow-mobile/.env`
 
 ```env
 EXPO_PUBLIC_API_BASE_URL=https://backend.julow.ru/api/v1
+EXPO_PUBLIC_OAUTH_REDIRECT_URI=https://julow.ru/oauth/mobile-callback
 ```
 
-Для OAuth **других env на мобилке нет**: `redirect_uri` зашит в коде (`julowmobile://oauth/callback`), схема — в `app.json`.
+### `julow-mobile` EAS Secrets (copy-paste)
 
-Для **EAS production** (`eas build --profile production`): задайте `EXPO_PUBLIC_API_BASE_URL` в [EAS Environment Variables](https://docs.expo.dev/eas/environment-variables/) — значение вшивается на этапе сборки.
-
----
-
-## 5. QR login (production checklist)
-
-См. также `docs/QR_LOGIN.md`.
-
-| # | Действие |
-|---|----------|
-| 1 | Backend с Redis (`REDIS_*`) задеплоен |
-| 2 | Endpoints: `POST /auth/qr/create`, `POST /auth/qr/confirm`, `GET /auth/qr/poll/{token}` |
-| 3 | Web BFF: `/api/auth/qr/create`, `/api/auth/qr/poll/[token]` |
-| 4 | `NEXT_PUBLIC_APP_URL` = публичный URL веба (QR: `https://app.julow.ru/login/qr?token=...`) |
-| 5 | Mobile: `EXPO_PUBLIC_API_BASE_URL` → тот же backend |
-| 6 | На телефоне: войти в аккаунт → Настройки → **Сканировать QR** (нативная камера, нужен rebuild после `expo-camera`) |
-| 7 | Deep link `julow://qr-login?token=...` парсится в `src/lib/qr-login.ts` |
-
-Без backend/Redis веб получит **502** на create/poll; confirm с телефона — **404**.
-
----
-
-## 6. Тестирование release APK
-
-1. Соберите production: `eas build -p android --profile production` (или локально `bunx expo run:android --variant release`).
-2. Убедитесь, что в APK зашит prod API: лог при старте / проверка `EXPO_PUBLIC_API_BASE_URL`.
-3. **OAuth**: на экране входа → Google / GitHub / Яндекс → браузер провайдера → возврат в приложение → главный экран.
-4. Типичные ошибки:
-   - `redirect_uri_mismatch` — URI не добавлен в консоль провайдера.
-   - Пустой `authorize_url` / 400 — нет `OAUTH_*` на backend.
-   - Сеть — эмулятор без прокси: см. `EXPO_PUBLIC_ANDROID_EMULATOR_API_BASE_URL` в `.env.example`.
-5. **QR**: залогиньтесь на телефоне → откройте `https://app.julow.ru/login/qr` в браузере → сканируйте QR в приложении.
-
----
-
-## 7. Redirect URI — сводка
-
-```
-Web dev:     http://localhost:3000/oauth/callback
-Web prod:    https://app.julow.ru/oauth/callback
-Mobile:      julowmobile://oauth/callback
+```bash
+eas secret:create --scope project --name EXPO_PUBLIC_API_BASE_URL --value https://backend.julow.ru/api/v1
+eas secret:create --scope project --name EXPO_PUBLIC_OAUTH_REDIRECT_URI --value https://julow.ru/oauth/mobile-callback
+eas secret:list --scope project
 ```
 
-`redirect_uri` при обмене code **должен побайтно совпадать** с тем, что был в запросе authorize (и зарегистрирован у провайдера).
+---
+
+## 6) Быстрый smoke-check после настройки
+
+1. Убедитесь, что в `julow_backend/.env` заполнены все `OAUTH_*`.
+2. Убедитесь, что `EXPO_PUBLIC_OAUTH_REDIRECT_URI=https://julow.ru/oauth/mobile-callback` в mobile env/EAS.
+3. На устройстве откройте логин и нажмите Google/GitHub/Yandex.
+4. Ожидаемый путь:
+   - провайдер авторизует пользователя,
+   - открывается `https://julow.ru/oauth/mobile-callback`,
+   - страница редиректит в `julowmobile://oauth/callback?...`,
+   - приложение завершает вход через `POST /auth/login/oauth`.
 
 ---
 
-## 8. Код (реализовано в репозитории)
+## 7) Troubleshooting (с точными сообщениями)
 
-| Компонент | Файлы |
-|-----------|--------|
-| Backend OAuth + Yandex | `julow_backend/.../oauth_adapter.py`, `oauth_settings.py`, DI `container.py` |
-| Mobile flow | `src/lib/oauth.ts` (`MOBILE_OAUTH_REDIRECT_URI`), `src/lib/api-client.ts` (`fetchOAuthAuthorizeUrl`, `authOAuthLogin`) |
-| UI | `src/app/login.tsx`, `src/contexts/auth-context.tsx` (`loginWithOAuth`) |
-| Deep link | `app.json` (`scheme`, Android `intentFilters`), `src/app/oauth/callback.tsx` |
-| Web + Yandex | `julow-web/.../auth-social-blocks.tsx`, BFF routes |
+### Ошибки provider console / callback
 
-Подробности QR: `docs/QR_LOGIN.md`.
+- `Error 400: redirect_uri_mismatch` (Google)
+  - Причина: `redirect_uri` не добавлен в `Authorized redirect URIs` или отличается символами.
+  - Проверка: сравните URI побайтно, без лишнего `/` в конце.
+
+- `The redirect_uri is not associated with this application.` (GitHub)
+  - Причина: у OAuth App в `Authorization callback URL` указан другой URL.
+  - Решение: исправить callback URL или использовать отдельный OAuth App для текущей среды.
+
+- `invalid_request` / ошибка про `redirect_uri` (Yandex)
+  - Причина: URI не добавлен в поле `Redirect URI`.
+  - Решение: добавить все нужные URI в список приложения.
+
+### Ошибки приложения / backend
+
+- `Missing authorize_url`
+  - Где: mobile/web при запросе authorize URL.
+  - Причина: backend вернул некорректный ответ (обычно проблема с `OAUTH_*`).
+
+- `OAuth cancelled`
+  - Где: mobile (`src/lib/oauth.ts`).
+  - Причина: пользователь закрыл окно авторизации.
+
+- `OAuth session failed`
+  - Где: mobile (`src/lib/oauth.ts`).
+  - Причина: браузерная сессия не вернула валидный success callback.
+
+- `No authorization code in callback`
+  - Где: mobile (`src/lib/oauth.ts`) или web callback.
+  - Причина: провайдер вернул callback без `code`.
+
+- `OAuth-провайдер отклонил вход: ...`
+  - Где: `julow-web/src/app/oauth/callback/page.tsx`.
+  - Причина: провайдер вернул `error`/`error_description` (например, user cancelled).

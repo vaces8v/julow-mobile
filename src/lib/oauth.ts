@@ -1,10 +1,11 @@
 /**
- * Mobile OAuth — same backend contract as julow-web, custom redirect via app scheme.
+ * Mobile OAuth — unified flow for all providers with HTTPS callback bridge.
  *
  * Flow:
- *   1. GET  /auth/oauth/oauth_{provider}/authorize?redirect_uri=julowmobile://oauth/callback
- *   2. WebBrowser.openAuthSessionAsync(authorize_url, redirect_uri)
- *   3. POST /auth/login/oauth { provider, authorization_code, redirect_uri }
+ *   1. GET  /auth/oauth/oauth_{provider}/authorize?redirect_uri=https://julow.ru/oauth/mobile-callback
+ *   2. WebBrowser.openAuthSessionAsync(authorize_url, julowmobile://oauth/callback)
+ *   3. /oauth/mobile-callback redirects browser to julowmobile://oauth/callback?code=...&state=...
+ *   4. POST /auth/login/oauth { provider, authorization_code, redirect_uri }
  */
 
 import * as WebBrowser from 'expo-web-browser';
@@ -19,12 +20,11 @@ const PROVIDER_CODES: Record<MobileOAuthProvider, string> = {
   yandex: 'oauth_yandex',
 };
 
-/**
- * Fixed redirect URI — must match byte-for-byte in provider consoles and backend exchange.
- * Do not use Linking.createURL: it yields `julowmobile:/oauth/callback` (one slash),
- * while OAuth providers expect `julowmobile://oauth/callback` (host `oauth`, path `/callback`).
- */
-export const MOBILE_OAUTH_REDIRECT_URI = 'julowmobile://oauth/callback';
+const DEFAULT_MOBILE_OAUTH_REDIRECT_URI = 'https://julow.ru/oauth/mobile-callback';
+const MOBILE_OAUTH_RETURN_URI = 'julowmobile://oauth/callback';
+
+export const MOBILE_OAUTH_REDIRECT_URI =
+  (process.env.EXPO_PUBLIC_OAUTH_REDIRECT_URI ?? '').trim() || DEFAULT_MOBILE_OAUTH_REDIRECT_URI;
 
 export function getMobileOAuthRedirectUri(): string {
   return MOBILE_OAUTH_REDIRECT_URI;
@@ -68,7 +68,7 @@ export async function signInWithOAuth(provider: MobileOAuthProvider): Promise<{
 
   const authorizeUrl = await fetchOAuthAuthorizeUrl(providerCode, redirectUri);
 
-  const session = await WebBrowser.openAuthSessionAsync(authorizeUrl, redirectUri, {
+  const session = await WebBrowser.openAuthSessionAsync(authorizeUrl, MOBILE_OAUTH_RETURN_URI, {
     preferEphemeralSession: false,
   });
 
