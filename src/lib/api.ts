@@ -15,6 +15,7 @@ import {
   ApiError,
 } from './api-client';
 import { buildUploadFormData } from './build-upload-form-data';
+import { mapJoinIceServers } from './meeting-audio';
 
 /**
  * The backend is currently configured with `S3_ENDPOINT_URL=http://minio:9000`
@@ -95,6 +96,18 @@ export interface WorkspacePayload {
   slug: string;
 }
 
+/** Matches backend `ProjectStatus` enum values. */
+export type ProjectStatus = 'active' | 'archived' | 'suspended' | 'pending_deletion';
+
+export type ProjectVisibility = 'private' | 'workspace' | 'organization' | 'public';
+
+export type ProjectMethodology = 'kanban' | 'scrum' | 'waterfall' | 'hybrid' | 'shape_up';
+
+export interface ProjectCategoryPayload {
+  name: string;
+  color?: string;
+}
+
 export interface ProjectPayload {
   id: string;
   workspaceId: string;
@@ -102,14 +115,25 @@ export interface ProjectPayload {
   description?: string;
   color?: string;
   icon?: string;
-  status?: string;
-  methodology?: string;
+  status?: ProjectStatus;
+  methodology?: ProjectMethodology;
+  visibility?: ProjectVisibility;
+  category?: ProjectCategoryPayload;
   ownerIds?: string[];
+  startDate?: string;
   progress?: number;
   tasksTotal?: number;
   tasksDone?: number;
   dueDate?: string;
   members?: { id: string; name: string; avatar?: string }[];
+}
+
+/** Normalize legacy/client status strings to backend values. */
+export function normalizeProjectStatus(status?: string | null): ProjectStatus {
+  const key = (status ?? 'active').toLowerCase();
+  if (key === 'paused') return 'suspended';
+  if (key === 'archived' || key === 'suspended' || key === 'pending_deletion') return key;
+  return 'active';
 }
 
 export interface TaskPayload {
@@ -348,6 +372,9 @@ export interface MeetingJoinPayload {
   joinUrl: string;
   accessToken?: string;
   provider: string;
+  /** Backend hint: `webrtc` | `krisp` — client picks DeepFilterNet or WebRTC NS. */
+  audioNoiseFilter?: string;
+  iceServers?: RTCIceServer[];
 }
 
 export interface UserPayload {
@@ -465,7 +492,7 @@ interface BackendProject {
   status: string;
   color?: string | null;
   icon?: string | null;
-  category?: string | null;
+  category?: { name: string; color?: string | null } | null;
   owner_ids?: string[] | null;
   start_date?: string | null;
   deadline?: string | null;
@@ -767,9 +794,14 @@ function mapProject(bp: BackendProject): ProjectPayload {
     description: bp.description?.content ?? undefined,
     color: bp.color ?? undefined,
     icon: bp.icon ?? undefined,
-    status: bp.status,
-    methodology: bp.methodology,
+    status: normalizeProjectStatus(bp.status),
+    methodology: bp.methodology as ProjectMethodology,
+    visibility: bp.visibility as ProjectVisibility,
+    category: bp.category
+      ? { name: bp.category.name, color: bp.category.color ?? undefined }
+      : undefined,
     ownerIds: bp.owner_ids ?? [],
+    startDate: bp.start_date ?? undefined,
     dueDate: bp.deadline ?? undefined,
   };
 }
@@ -2004,11 +2036,19 @@ export const api = {
       join_url: string;
       access_token?: string | null;
       provider: string;
+      audio_noise_filter?: string | null;
+      ice_servers?: Array<{
+        urls: string | string[];
+        username?: string;
+        credential?: string;
+      }> | null;
     }>(`/meetings/${meetingId}/join`);
     return {
       joinUrl: res.data.join_url,
       accessToken: res.data.access_token ?? undefined,
       provider: res.data.provider,
+      audioNoiseFilter: res.data.audio_noise_filter ?? undefined,
+      iceServers: mapJoinIceServers(res.data.ice_servers),
     };
   },
 

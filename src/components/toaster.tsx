@@ -13,6 +13,7 @@
  * and tap-to-go callback. Auto-dismisses after `duration` ms (default 5s).
  */
 
+import { ToastSurface } from '@/components/toast-surface';
 import { SigmaRadius, SigmaTypo } from '@/constants/sigma';
 import { useSemanticTheme, type SemanticTheme } from '@/hooks/use-semantic-theme';
 import {
@@ -25,7 +26,7 @@ import {
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react-native';
 import { useEffect, useRef, useState } from 'react';
-import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInUp, FadeOutUp, LinearTransition } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -136,7 +137,7 @@ export function Toaster() {
   return (
     <View
       pointerEvents="box-none"
-      style={[styles.root, { top: insets.top + 6 }]}
+      style={[styles.root, { top: insets.top + 8 }]}
     >
       {items.map((t) => (
         <ToastCard key={t.id} item={t} c={c} />
@@ -167,67 +168,78 @@ function ToastCard({ item, c }: { item: ToastItem; c: SemanticTheme }) {
 
   return (
     <Animated.View
-      entering={FadeInUp.springify().damping(18).stiffness(180)}
-      exiting={FadeOutUp.duration(220)}
-      layout={LinearTransition.springify().damping(18).stiffness(180)}
-      style={[
-        styles.card,
-        {
-          backgroundColor: c.surface,
-          borderColor: c.border,
-          shadowColor: c.scheme === 'dark' ? '#000' : '#1a1a1a',
-        },
-      ]}
+      entering={FadeInUp.springify().damping(20).stiffness(220)}
+      exiting={FadeOutUp.duration(240)}
+      layout={LinearTransition.springify().damping(20).stiffness(220)}
     >
-      <Pressable
-        onPress={handlePress}
-        style={({ pressed }) => [styles.pressArea, { opacity: pressed ? 0.85 : 1 }]}
-      >
-        <View style={[styles.iconWrap, { backgroundColor: color + '22' }]}>
-          <HugeiconsIcon icon={icon} size={20} color={color} strokeWidth={1.8} />
-        </View>
-        <View style={styles.content}>
-          <Text
-            numberOfLines={1}
-            style={[styles.title, { color: c.foreground }]}
-          >
-            {item.title}
-          </Text>
-          {item.body ? (
-            <Text
-              numberOfLines={2}
-              style={[styles.body, { color: c.muted }]}
-            >
-              {item.body}
-            </Text>
-          ) : null}
-        </View>
-        {item.action ? (
-          <Pressable
-            onPress={handleAction}
-            hitSlop={8}
-            style={({ pressed }) => [
-              styles.actionBtn,
+      <ToastSurface c={c} accent={color}>
+        <Pressable
+          onPress={handlePress}
+          style={({ pressed }) => [styles.pressArea, { opacity: pressed ? 0.88 : 1 }]}
+        >
+          <View
+            style={[
+              styles.iconWrap,
               {
-                backgroundColor: color + (c.scheme === 'dark' ? '33' : '1f'),
-                opacity: pressed ? 0.7 : 1,
+                backgroundColor: color + (c.scheme === 'dark' ? '28' : '18'),
+                borderColor: color + (c.scheme === 'dark' ? '55' : '35'),
               },
             ]}
           >
-            <Text style={[styles.actionLabel, { color }]} numberOfLines={1}>
-              {item.action.label}
+            <HugeiconsIcon icon={icon} size={20} color={color} strokeWidth={1.8} />
+          </View>
+          <View style={styles.content}>
+            <Text
+              numberOfLines={1}
+              selectable
+              style={[styles.title, { color: c.foreground }]}
+            >
+              {item.title}
             </Text>
-          </Pressable>
-        ) : (
-          <Pressable
-            onPress={handleDismiss}
-            hitSlop={10}
-            style={styles.closeBtn}
-          >
-            <HugeiconsIcon icon={Cancel01Icon} size={16} color={c.muted} strokeWidth={2} />
-          </Pressable>
-        )}
-      </Pressable>
+            {item.body ? (
+              <Text
+                numberOfLines={2}
+                selectable
+                style={[styles.body, { color: c.muted }]}
+              >
+                {item.body}
+              </Text>
+            ) : null}
+          </View>
+          {item.action ? (
+            <Pressable
+              onPress={handleAction}
+              hitSlop={8}
+              style={({ pressed }) => [
+                styles.actionBtn,
+                {
+                  backgroundColor: color + (c.scheme === 'dark' ? '38' : '22'),
+                  borderColor: color + (c.scheme === 'dark' ? '55' : '40'),
+                  opacity: pressed ? 0.72 : 1,
+                },
+              ]}
+            >
+              <Text style={[styles.actionLabel, { color }]} numberOfLines={1}>
+                {item.action.label}
+              </Text>
+            </Pressable>
+          ) : (
+            <Pressable
+              onPress={handleDismiss}
+              hitSlop={10}
+              style={({ pressed }) => [
+                styles.closeBtn,
+                {
+                  backgroundColor: c.scheme === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(15,23,42,0.05)',
+                  opacity: pressed ? 0.65 : 1,
+                },
+              ]}
+            >
+              <HugeiconsIcon icon={Cancel01Icon} size={15} color={c.muted} strokeWidth={2} />
+            </Pressable>
+          )}
+        </Pressable>
+      </ToastSurface>
     </Animated.View>
   );
 }
@@ -235,65 +247,56 @@ function ToastCard({ item, c }: { item: ToastItem; c: SemanticTheme }) {
 const styles = StyleSheet.create({
   root: {
     position: 'absolute',
-    left: 12,
-    right: 12,
+    left: 14,
+    right: 14,
     zIndex: 9999,
     elevation: 9999,
-    gap: 8,
-  },
-  card: {
-    borderRadius: SigmaRadius.lg,
-    borderWidth: 1,
-    overflow: 'hidden',
-    ...Platform.select({
-      ios: {
-        shadowOffset: { width: 0, height: 6 },
-        shadowOpacity: 0.18,
-        shadowRadius: 14,
-      },
-      android: {
-        elevation: 6,
-      },
-    }),
+    gap: 10,
   },
   pressArea: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    gap: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    paddingLeft: 16,
+    gap: 12,
   },
   iconWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: StyleSheet.hairlineWidth,
     alignItems: 'center',
     justifyContent: 'center',
   },
   content: {
     flex: 1,
-    gap: 2,
+    gap: 3,
   },
   title: {
     fontSize: SigmaTypo.body,
     fontWeight: '600',
+    letterSpacing: -0.15,
   },
   body: {
     fontSize: SigmaTypo.caption,
     lineHeight: SigmaTypo.caption + 4,
   },
   actionBtn: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
     borderRadius: SigmaRadius.md,
+    borderWidth: StyleSheet.hairlineWidth,
   },
   actionLabel: {
     fontSize: SigmaTypo.caption,
-    fontWeight: '600',
+    fontWeight: '700',
+    letterSpacing: 0.1,
   },
   closeBtn: {
-    width: 24,
-    height: 24,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
   },

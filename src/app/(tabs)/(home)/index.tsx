@@ -1,5 +1,6 @@
 import { AreaChart } from '@/components/charts/AreaChart';
 import { BarChart } from '@/components/charts/BarChart';
+import { AccentCardSurface, CardSurface } from '@/components/card-surface';
 import { HeaderBlurBackground } from '@/components/header-blur-background';
 import { MEETING_RIPPLE_ART, MeetingCardRippleArt, meetingRippleIconColor } from '@/components/meeting-card-ripple-art';
 import { Fade } from '@/components/ui/fade';
@@ -10,14 +11,11 @@ import { useSemanticTheme, type SemanticTheme } from '@/hooks/use-semantic-theme
 import { useI18n } from '@/i18n/context';
 import { api, type AnalyticsPayload, type TaskPayload } from '@/lib/api';
 import { cachedApi } from '@/lib/cache/cached-api';
+import { getMeetingBorderStops, getMeetingHeroSheenStops } from '@/lib/theme-surfaces';
 import { useCacheSync } from '@/lib/cache/use-cache-sync';
-import {
-  HOME_HEADER_RANGES,
-  homeScrollOffsetJs,
-  homeScrollY,
-  resetHomeScroll,
-  setHomeScrollOffsetJs,
-} from '@/lib/home-scroll-state';
+import { useCollapsibleHeaderScroll } from '@/hooks/use-collapsible-header-scroll';
+import { useCollapsibleHeaderStyles } from '@/hooks/use-collapsible-header-styles';
+import { useCollapsibleRefreshControl } from '@/hooks/use-collapsible-refresh-control';
 import {
   AlertCircleIcon,
   ArrowRight01Icon,
@@ -37,7 +35,7 @@ import {
 import { HugeiconsIcon } from '@hugeicons/react-native';
 import { BlurTargetView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router, useFocusEffect } from 'expo-router';
+import { router } from 'expo-router';
 import { Chip, Popover } from 'heroui-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -45,7 +43,6 @@ import {
   Dimensions,
   Platform,
   Pressable,
-  RefreshControl,
   StatusBar,
   StyleSheet,
   Text,
@@ -55,8 +52,6 @@ import {
 import Animated, {
   Extrapolation,
   interpolate,
-  runOnJS,
-  useAnimatedScrollHandler,
   useAnimatedStyle,
   useSharedValue,
 } from 'react-native-reanimated';
@@ -234,9 +229,14 @@ export default function DashboardScreen() {
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await refreshData(true);
-    setRefreshing(false);
+    try {
+      await refreshData(true);
+    } finally {
+      setRefreshing(false);
+    }
   }, [refreshData]);
+
+  const refreshControl = useCollapsibleRefreshControl({ refreshing, onRefresh, c });
 
   const createTask = async () => {
     if (!activeWorkspaceId || !newTaskTitle.trim()) return;
@@ -378,105 +378,21 @@ export default function DashboardScreen() {
   // ── Weekly chart data (real, from tasks) ──
   const weeklyData = useMemo(() => buildWeeklySeries(tasks), [tasks]);
 
-  const scrollRef = useRef<Animated.ScrollView>(null);
+  const { scrollRef, headerProgress, scrollHandler, resetScroll } = useCollapsibleHeaderScroll('home');
   const iconsRestX = SCREEN_W - 200;
+  const {
+    headerBgStyle,
+    smallTitleStyle: headerTitleStyle,
+    largeTitleStyle,
+    leftIconsStyle,
+  } = useCollapsibleHeaderStyles(headerProgress, { iconsRestX });
 
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('tabPress', (tab) => {
-      if (tab === '(home)') {
-        resetHomeScroll();
-        scrollRef.current?.scrollTo({ y: 0, animated: true });
-      }
+      if (tab === '(home)') resetScroll();
     });
     return () => sub.remove();
-  }, []);
-
-  useFocusEffect(
-    useCallback(() => {
-      const y = homeScrollOffsetJs;
-      if (y > 1) {
-        requestAnimationFrame(() => {
-          scrollRef.current?.scrollTo({ y, animated: false });
-        });
-      }
-    }, []),
-  );
-
-  const scrollHandler = useAnimatedScrollHandler({
-    onScroll: (e) => {
-      const y = e.contentOffset.y;
-      homeScrollY.value = y;
-      runOnJS(setHomeScrollOffsetJs)(y);
-    },
-  });
-
-  const leftIconsStyle = useAnimatedStyle(() => ({
-    transform: [
-      {
-        translateX: interpolate(
-          homeScrollY.value,
-          [...HOME_HEADER_RANGES.icons],
-          [iconsRestX, iconsRestX, iconsRestX * 0.18, 0],
-          Extrapolation.CLAMP,
-        ),
-      },
-    ],
-  }));
-
-  const headerBgStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(
-      homeScrollY.value,
-      [...HOME_HEADER_RANGES.bg],
-      [0, 0, 1],
-      Extrapolation.CLAMP,
-    ),
-  }));
-
-  const headerTitleStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(
-      homeScrollY.value,
-      [...HOME_HEADER_RANGES.title],
-      [0, 1],
-      Extrapolation.CLAMP,
-    ),
-    transform: [
-      {
-        translateY: interpolate(
-          homeScrollY.value,
-          [...HOME_HEADER_RANGES.title],
-          [14, 0],
-          Extrapolation.CLAMP,
-        ),
-      },
-    ],
-  }));
-
-  const largeTitleStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(
-      homeScrollY.value,
-      [...HOME_HEADER_RANGES.largeTitle],
-      [1, 0],
-      Extrapolation.CLAMP,
-    ),
-    transform: [
-      {
-        scale: interpolate(
-          homeScrollY.value,
-          [-40, 0, HOME_HEADER_RANGES.largeTitle[1]],
-          [1.03, 1, 0.94],
-          Extrapolation.CLAMP,
-        ),
-      },
-      {
-        translateY: interpolate(
-          homeScrollY.value,
-          [-60, 0, HOME_HEADER_RANGES.largeTitle[1]],
-          [-14, 0, -10],
-          Extrapolation.CLAMP,
-        ),
-      },
-    ],
-  }));
+  }, [resetScroll]);
 
   const HEADER_H = insets.top + 54;
 
@@ -543,15 +459,7 @@ export default function DashboardScreen() {
         scrollEventThrottle={16}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingTop: insets.top + 9, paddingBottom: insets.bottom + 110 }}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor={c.foreground}
-            colors={[c.accent]}
-            progressBackgroundColor={c.surfaceSecondary}
-          />
-        }
+        refreshControl={refreshControl}
       >
         <Animated.View style={[styles.largeTitleContainer, largeTitleStyle]}>
           <Text style={[styles.largeTitle, { color: c.foreground }]}>{d.title}</Text>
@@ -584,7 +492,7 @@ export default function DashboardScreen() {
 
         {/* Join Project */}
         <View style={{ paddingHorizontal: 20, marginTop: 16 }}>
-          <PremiumSurface c={c} accent={c.accent}>
+          <CardSurface c={c} accent={c.accent}>
             <View style={styles.premiumCardBody}>
               <View style={styles.premiumCardHead}>
                 <View style={[styles.premiumIconWrap, { backgroundColor: c.accent + '20' }]}>
@@ -623,7 +531,7 @@ export default function DashboardScreen() {
                 <Text style={[styles.premiumError, { color: c.danger }]}>{joinError}</Text>
               )}
             </View>
-          </PremiumSurface>
+          </CardSurface>
         </View>
 
         {/* Meetings featured card */}
@@ -633,7 +541,7 @@ export default function DashboardScreen() {
 
         {/* Productivity trend */}
         <View style={{ marginTop: 18, paddingHorizontal: 20 }}>
-          <PremiumSurface c={c} accent={c.accent}>
+          <CardSurface c={c} accent={c.accent}>
             <View style={styles.premiumCardBody}>
               <SectionHeader c={c} eyebrow={d.focusHours} title={d.productivityTrends} />
               <View style={[styles.chartWell, { backgroundColor: c.surfaceSecondary }]}>
@@ -645,12 +553,12 @@ export default function DashboardScreen() {
                 />
               </View>
             </View>
-          </PremiumSurface>
+          </CardSurface>
         </View>
 
         {/* Sprint board */}
         <View style={{ marginTop: 16, paddingHorizontal: 20 }}>
-          <PremiumSurface c={c} allowOverflow>
+          <CardSurface c={c} allowOverflow>
             <View style={styles.premiumCardBody}>
               <View style={styles.boardHeaderRow}>
                 <SectionHeader c={c} title={d.sprintBoardTitle} compact />
@@ -716,12 +624,12 @@ export default function DashboardScreen() {
                 </View>
               )}
             </View>
-          </PremiumSurface>
+          </CardSurface>
         </View>
 
         {/* Task distribution */}
         <View style={{ marginTop: 16, paddingHorizontal: 20 }}>
-          <PremiumSurface c={c} accent="#a855f7">
+          <CardSurface c={c} accent="#a855f7">
             <View style={styles.premiumCardBody}>
               <SectionHeader c={c} eyebrow={d.perDayWeek} title={d.taskDist} />
               <View style={[styles.chartWell, { backgroundColor: c.surfaceSecondary }]}>
@@ -733,12 +641,12 @@ export default function DashboardScreen() {
                 />
               </View>
             </View>
-          </PremiumSurface>
+          </CardSurface>
         </View>
 
         {/* Activity feed */}
         <View style={{ marginTop: 16, paddingHorizontal: 20, marginBottom: 8 }}>
-          <PremiumSurface c={c} accent={c.success}>
+          <CardSurface c={c} accent={c.success}>
             <View style={styles.premiumCardBody}>
               <SectionHeader c={c} eyebrow={d.activityPulse} title={d.activity} />
               {activityFeed.length === 0 ? (
@@ -770,7 +678,7 @@ export default function DashboardScreen() {
                 </View>
               )}
             </View>
-          </PremiumSurface>
+          </CardSurface>
         </View>
       </Animated.ScrollView>
       </BlurTargetView>
@@ -779,46 +687,6 @@ export default function DashboardScreen() {
 }
 
 // ─── Sub-components ──────────────────────────────────────────────────
-
-function PremiumSurface({
-  c,
-  children,
-  accent,
-  allowOverflow,
-}: {
-  c: SemanticTheme;
-  children: React.ReactNode;
-  accent?: string;
-  allowOverflow?: boolean;
-}) {
-  const borderColors =
-    c.scheme === 'dark'
-      ? ['rgba(255,255,255,0.24)', 'rgba(255,255,255,0.06)', 'rgba(255,255,255,0.12)']
-      : ['rgba(255,255,255,0.95)', 'rgba(0,0,0,0.05)', 'rgba(255,255,255,0.7)'];
-
-  return (
-    <LinearGradient colors={borderColors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.premiumBorder}>
-      <View
-        style={[
-          styles.premiumInner,
-          { backgroundColor: c.surface },
-          allowOverflow && styles.premiumInnerVisible,
-        ]}
-      >
-        {!!accent && (
-          <LinearGradient
-            colors={[accent + '28', accent + '08', 'transparent']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.premiumSheen}
-            pointerEvents="none"
-          />
-        )}
-        <View style={styles.premiumContent}>{children}</View>
-      </View>
-    </LinearGradient>
-  );
-}
 
 function SectionHeader({
   c,
@@ -883,11 +751,6 @@ function StatCard({
     transform: [{ scale: pressed.value ? 0.97 : 1 }],
   }));
 
-  const borderColors =
-    c.scheme === 'dark'
-      ? [stat.color + '55', 'rgba(255,255,255,0.08)', 'rgba(255,255,255,0.06)']
-      : [stat.color + '66', 'rgba(255,255,255,0.9)', 'rgba(0,0,0,0.04)'];
-
   return (
     <Pressable
       onPressIn={() => (pressed.value = 1)}
@@ -895,34 +758,25 @@ function StatCard({
       style={{ flex: 1 }}
     >
       <Animated.View style={animStyle}>
-        <LinearGradient colors={borderColors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.statBorder}>
-          <View style={[styles.statCard, { backgroundColor: c.surface }]}>
-            <LinearGradient
-              colors={[stat.color + '22', stat.color + '06', 'transparent']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={StyleSheet.absoluteFill}
-              pointerEvents="none"
-            />
-            <View style={styles.statCardContent}>
-              <View style={[styles.statIconWrap, { backgroundColor: stat.color + '14' }]}>
-                <HugeiconsIcon icon={stat.icon} size={59} color={stat.color} strokeWidth={1.5} />
-              </View>
-              <View style={styles.statValueBlock}>
-                <Text style={[styles.statValue, { color: c.foreground }]}>
-                  {stat.value}
-                  {stat.suffix ?? ''}
-                </Text>
-              </View>
-              <View style={styles.statTextBlock}>
-                <Text style={[styles.statLabel, { color: c.foreground }]}>{stat.label}</Text>
-                <Text style={[styles.statSub, { color: c.muted }]} numberOfLines={1}>
-                  {stat.sub}
-                </Text>
-              </View>
+        <AccentCardSurface c={c} color={stat.color} style={styles.statBorder} innerStyle={styles.statCard}>
+          <View style={styles.statCardContent}>
+            <View style={[styles.statIconWrap, { backgroundColor: stat.color + (c.scheme === 'dark' ? '14' : '10') }]}>
+              <HugeiconsIcon icon={stat.icon} size={59} color={stat.color} strokeWidth={1.5} />
+            </View>
+            <View style={styles.statValueBlock}>
+              <Text style={[styles.statValue, { color: c.foreground }]} allowFontScaling={false}>
+                {stat.value}
+                {stat.suffix ?? ''}
+              </Text>
+            </View>
+            <View style={styles.statTextBlock}>
+              <Text style={[styles.statLabel, { color: c.foreground }]} allowFontScaling={false}>{stat.label}</Text>
+              <Text style={[styles.statSub, { color: c.muted }]} numberOfLines={1} allowFontScaling={false}>
+                {stat.sub}
+              </Text>
             </View>
           </View>
-        </LinearGradient>
+        </AccentCardSurface>
       </Animated.View>
     </Pressable>
   );
@@ -1015,17 +869,13 @@ function MeetingsFeaturedCard({
   }));
 
   const iconAccent = meetingRippleIconColor(c.scheme === 'dark');
-  const borderColors =
-    c.scheme === 'dark'
-      ? ['rgba(129,140,248,0.34)', 'rgba(255,255,255,0.08)', 'rgba(255,255,255,0.05)']
-      : ['rgba(99,102,241,0.28)', 'rgba(255,255,255,0.92)', 'rgba(0,0,0,0.04)'];
+  const borderColors = getMeetingBorderStops(c.scheme);
   const heroSubtitle = m.subtitle.split('—')[0]?.trim() || m.subtitle;
 
-  return (
-    <LinearGradient colors={borderColors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.meetingBorder}>
-      <View style={[styles.meetingHero, { backgroundColor: c.surface }]}>
+  const heroInner = (
+    <>
         <LinearGradient
-          colors={c.scheme === 'dark' ? ['rgba(99,102,241,0.12)', 'transparent'] : ['rgba(99,102,241,0.07)', 'transparent']}
+          colors={getMeetingHeroSheenStops(c.scheme)}
           start={{ x: 1, y: 0 }}
           end={{ x: 0.2, y: 1 }}
           style={StyleSheet.absoluteFill}
@@ -1077,8 +927,21 @@ function MeetingsFeaturedCard({
             </Pressable>
           </View>
         </View>
-      </View>
-    </LinearGradient>
+    </>
+  );
+
+  if (borderColors) {
+    return (
+      <LinearGradient colors={borderColors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.meetingBorder}>
+        <View style={[styles.meetingHero, { backgroundColor: c.surface }]}>{heroInner}</View>
+      </LinearGradient>
+    );
+  }
+
+  return (
+    <View style={[styles.meetingBorderLight, { borderColor: c.border, backgroundColor: c.surface }]}>
+      <View style={styles.meetingHero}>{heroInner}</View>
+    </View>
   );
 }
 
@@ -1177,6 +1040,16 @@ const styles = StyleSheet.create({
     borderRadius: SigmaRadius.xl,
     padding: 1,
   },
+  meetingBorderLight: {
+    borderRadius: SigmaRadius.xl,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+    shadowColor: '#0f172a',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
+    elevation: 2,
+  },
   meetingHero: {
     borderRadius: SigmaRadius.xl - 1,
     overflow: 'hidden',
@@ -1259,25 +1132,6 @@ const styles = StyleSheet.create({
     fontSize: SigmaTypo.bodySmall,
     fontWeight: '700',
     letterSpacing: 0.1,
-  },
-  premiumBorder: {
-    borderRadius: SigmaRadius.xl,
-    padding: 1,
-  },
-  premiumInner: {
-    borderRadius: SigmaRadius.xl - 1,
-    overflow: 'hidden',
-  },
-  premiumInnerVisible: {
-    overflow: 'visible',
-  },
-  premiumSheen: {
-    ...StyleSheet.absoluteFillObject,
-    pointerEvents: 'none',
-  },
-  premiumContent: {
-    position: 'relative',
-    zIndex: 1,
   },
   premiumCardBody: {
     padding: 18,
@@ -1377,8 +1231,6 @@ const styles = StyleSheet.create({
     padding: 1,
   },
   statCard: {
-    borderRadius: SigmaRadius.xl - 1,
-    overflow: 'hidden',
     height: 136,
   },
   statCardContent: {
@@ -1391,6 +1243,7 @@ const styles = StyleSheet.create({
     left: 22,
     top: 38,
     paddingRight: 72,
+    zIndex: 2,
   },
   statTextBlock: {
     position: 'absolute',
@@ -1399,6 +1252,7 @@ const styles = StyleSheet.create({
     bottom: 16,
     alignItems: 'flex-start',
     gap: 3,
+    zIndex: 2,
   },
   statIconWrap: {
     position: 'absolute',

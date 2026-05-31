@@ -1,5 +1,6 @@
 import { ChatAttachment } from '@/components/chats/chat-attachment';
-import { chatColorFromId, chatInitials, CHAT_PALETTE } from '@/components/chats/chat-avatar';
+import { chatColorFromId, chatInitials } from '@/components/chats/chat-avatar';
+import type { ChatMemberProfile } from '@/hooks/use-chat-member-profiles';
 import { ChatEmptyArt } from '@/components/chats/chat-empty-art';
 import { ChatFloatingInput } from '@/components/chats/chat-floating-input';
 import { ChatImagePreviewSheet, ChatLinkConfirmSheet } from '@/components/chats/chat-image-preview-sheet';
@@ -12,6 +13,8 @@ import {
 import { HeaderBlurBackground } from '@/components/header-blur-background';
 import { SigmaRadius, SigmaTypo } from '@/constants/sigma';
 import { useAuth } from '@/contexts/auth-context';
+import { useWorkspace } from '@/contexts/workspace-context';
+import { useChatMemberProfiles } from '@/hooks/use-chat-member-profiles';
 import { useComposerAttachments } from '@/hooks/use-composer-attachments';
 import { useSemanticTheme, type SemanticTheme } from '@/hooks/use-semantic-theme';
 import { useI18n } from '@/i18n/context';
@@ -113,6 +116,11 @@ export default function ChatThreadScreen() {
   const insets = useSafeAreaInsets();
   const { t, locale } = useI18n();
   const { user } = useAuth();
+  const { activeWorkspaceId } = useWorkspace();
+  const { memberOf, resolveDmChatTitle } = useChatMemberProfiles(
+    activeWorkspaceId,
+    user?.id,
+  );
   const cc = t.chats;
   const params = useLocalSearchParams<{ id: string }>();
   const chatId = Array.isArray(params.id) ? params.id[0] : params.id;
@@ -353,6 +361,7 @@ export default function ChatThreadScreen() {
           messages={messages}
           tone={c}
           userId={user?.id}
+          memberOf={memberOf}
           locale={locale}
           emptyLabel={cc.noMessages}
           dayLabels={{ today: cc.today, yesterday: cc.yesterday }}
@@ -367,6 +376,7 @@ export default function ChatThreadScreen() {
 
       <ThreadHeader
         chat={chat}
+        title={resolveDmChatTitle(chat)}
         insetsTop={insets.top}
         tone={c}
         hint={cc.defaultGroupHint}
@@ -434,6 +444,7 @@ function ChatList({
   messages,
   tone,
   userId,
+  memberOf,
   locale,
   emptyLabel,
   dayLabels,
@@ -448,6 +459,7 @@ function ChatList({
   messages: MessagePayload[];
   tone: SemanticTheme;
   userId: string | undefined;
+  memberOf: (userId: string) => ChatMemberProfile;
   locale: 'en' | 'ru' | 'de';
   emptyLabel: string;
   dayLabels: { today: string; yesterday: string };
@@ -495,6 +507,7 @@ function ChatList({
           messages={messages}
           tone={tone}
           userId={userId}
+          memberOf={memberOf}
           locale={locale}
           dayLabels={dayLabels}
           onLinkPress={onLinkPress}
@@ -513,6 +526,7 @@ const MessageRow = React.memo(function MessageRow({
   messages,
   tone,
   userId,
+  memberOf,
   locale,
   dayLabels,
   onLinkPress,
@@ -525,6 +539,7 @@ const MessageRow = React.memo(function MessageRow({
   messages: MessagePayload[];
   tone: SemanticTheme;
   userId: string | undefined;
+  memberOf: (userId: string) => ChatMemberProfile;
   locale: 'ru' | 'en' | 'de';
   dayLabels: { today: string; yesterday: string };
   onLinkPress: (url: string) => void;
@@ -550,6 +565,7 @@ const MessageRow = React.memo(function MessageRow({
         isMe={item.senderId === userId}
         isLocal={item.id.startsWith('local-')}
         groupWithPrev={sameAuthorAsPrev && !showDay}
+        senderProfile={memberOf(item.senderId)}
         locale={locale}
         onLinkPress={onLinkPress}
         onImagePress={onImagePress}
@@ -574,6 +590,7 @@ function DaySeparator({ label, tone }: { label: string; tone: SemanticTheme }) {
 
 function ThreadHeader({
   chat,
+  title,
   insetsTop,
   tone,
   hint,
@@ -581,6 +598,7 @@ function ThreadHeader({
   blurTargetRef,
 }: {
   chat: ChatPayload;
+  title: string;
   insetsTop: number;
   tone: SemanticTheme;
   hint: string;
@@ -589,7 +607,6 @@ function ThreadHeader({
 }) {
   const isDm = chat.chatType === 'dm';
   const chatColor = chatColorFromId(chat.id, chat.color);
-  const title = chat.name ?? (isDm ? 'Direct Message' : 'Group');
   const subtitle = isDm ? directLabel : `${chat.members?.length ?? 0} members · ${hint}`;
   const initials = chatInitials(title);
 
@@ -653,6 +670,7 @@ const Bubble = React.memo(function Bubble({
   isMe,
   isLocal,
   groupWithPrev,
+  senderProfile,
   locale,
   onLinkPress,
   onImagePress,
@@ -664,6 +682,7 @@ const Bubble = React.memo(function Bubble({
   isMe: boolean;
   isLocal: boolean;
   groupWithPrev: boolean;
+  senderProfile: ChatMemberProfile;
   locale: 'ru' | 'en' | 'de';
   onLinkPress: (url: string) => void;
   onImagePress: (source: FileDisplaySource, filename: string) => void;
@@ -675,8 +694,8 @@ const Bubble = React.memo(function Bubble({
   const myFg = tone.accentForeground;
   const peerFg = tone.foreground;
 
-  const senderInitial = msg.senderId?.slice(0, 1).toUpperCase() ?? '?';
-  const senderColor = CHAT_PALETTE[msg.senderId.charCodeAt(0) % CHAT_PALETTE.length];
+  const senderInitial = senderProfile.initials;
+  const senderColor = senderProfile.color;
   const showAvatar = !isMe && !groupWithPrev;
 
   const rowStyle = [

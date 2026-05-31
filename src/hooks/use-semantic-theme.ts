@@ -7,7 +7,10 @@ import { useColorScheme } from 'react-native';
 import { useCSSVariable } from 'uniwind';
 
 function pick(v: unknown, fallback: string): string {
-  return typeof v === 'string' && v.length > 0 ? v : fallback;
+  if (typeof v !== 'string') return fallback;
+  const trimmed = v.trim();
+  if (!trimmed || trimmed === 'transparent') return fallback;
+  return trimmed;
 }
 
 /** Запасные hex, если переменные ещё не подхватились (первый кадр / SSR). */
@@ -15,12 +18,12 @@ export const THEME_FALLBACK = {
   light: {
     background: '#f4f3f0',
     foreground: '#171717',
-    muted: '#737373',
-    border: '#e4e4e7',
-    separator: '#e8e8ea',
+    muted: '#6b7280',
+    border: '#e5e7eb',
+    separator: '#f3f4f6',
     surface: '#ffffff',
-    surfaceSecondary: '#f2f2f4',
-    surfaceTertiary: '#ebebed',
+    surfaceSecondary: '#f9fafb',
+    surfaceTertiary: '#f3f4f6',
     accent: '#2563eb',
     accentForeground: '#fafafa',
     danger: '#dc2626',

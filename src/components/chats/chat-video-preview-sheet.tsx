@@ -54,8 +54,10 @@ export function ChatVideoPreviewSheet({
 }: ChatVideoPreviewSheetProps) {
   const sheetOpen = open && !!source;
 
+  if (!sheetOpen) return null;
+
   return (
-    <BottomSheet isOpen={sheetOpen} onOpenChange={onOpenChange}>
+    <BottomSheet isOpen onOpenChange={onOpenChange}>
       <BottomSheet.Portal>
         <BottomSheet.Overlay />
         <AppBottomSheetContent

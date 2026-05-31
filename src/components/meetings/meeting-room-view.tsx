@@ -1,23 +1,22 @@
-import { chatColorFromId, chatInitials } from '@/components/chats/chat-avatar';
+import { chatColorFromId } from '@/components/chats/chat-avatar';
 import { SigmaRadius, SigmaTypo } from '@/constants/sigma';
+import { useLiveMeeting } from '@/contexts/live-meeting-context';
 import { useSemanticTheme, type SemanticTheme } from '@/hooks/use-semantic-theme';
 import { useI18n } from '@/i18n/context';
 import {
   ArrowLeft01Icon,
+  AudioWave01Icon,
   BubbleChatIcon,
   CallEnd02Icon,
-  Cancel01Icon,
   ComputerScreenShareIcon,
+  FilterHorizontalIcon,
   Mic01Icon,
   MicOff01Icon,
-  SentIcon,
   VideoReplayIcon,
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react-native';
 import {
-  AudioSession,
   VideoTrack,
-  useChat,
   useConnectionState,
   useIsSpeaking,
   useLocalParticipant,
@@ -30,41 +29,43 @@ import {
 } from '@livekit/react-native';
 import { BlurTargetView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import { ConnectionState, Track, VideoPresets } from 'livekit-client';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { router } from 'expo-router';
+import { useMeetingNoiseSuppressionApplier } from '@/hooks/use-meeting-noise-suppression';
+import { useMeetingParticipantDisplayName } from '@/hooks/use-meeting-participant-profile';
+import {
+  buildMeetingAudioCaptureOptions,
+  buildMeetingRoomOptions,
+  isNoiseSuppressionEnabled,
+  modeFromToggleEnabled,
+  type NoiseSuppressionMode,
+} from '@/lib/meeting-audio';
+import { ConnectionState, Track } from 'livekit-client';
+import { useCallback, useMemo, useRef } from 'react';
 import {
   ActivityIndicator,
-  Alert,
-  FlatList,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
   useWindowDimensions,
 } from 'react-native';
-import Animated, { FadeInDown } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { AppBottomSheetContent, BottomSheet, sheetSnapPercent } from '@/components/app-bottom-sheet';
 
 type Props = {
   meetingTitle: string;
+  onMinimize: () => void;
   onLeave: () => void;
+  noiseSuppressionMode: NoiseSuppressionMode;
+  onNoiseSuppressionModeChange: (mode: NoiseSuppressionMode) => void;
+  /** @deprecated Prefer noiseSuppressionMode. */
+  noiseSuppressionEnabled?: boolean;
+  /** @deprecated Prefer onNoiseSuppressionModeChange. */
+  onNoiseSuppressionChange?: (enabled: boolean) => void;
 };
 
 const PAGE_GUTTER = 10;
-const CHAT_SHEET_SNAP_POINTS = [sheetSnapPercent(0.62), sheetSnapPercent(0.88)] as const;
-
-type ChatRow = {
-  id: string;
-  fromId: string;
-  displayName: string;
-  text: string;
-  timestamp: number;
-  isSelf: boolean;
-};
 
 function hasActiveVideo(trackRef: TrackReferenceOrPlaceholder): boolean {
   if (!isTrackReference(trackRef)) return false;
@@ -76,16 +77,21 @@ function hasActiveVideo(trackRef: TrackReferenceOrPlaceholder): boolean {
   return track.mediaStream != null;
 }
 
-function participantDisplayName(name: string | undefined, identity: string, fallback: string) {
-  const trimmed = name?.trim();
-  if (trimmed && trimmed !== identity) return trimmed;
-  return identity || fallback;
-}
-
-export function MeetingRoomView({ meetingTitle, onLeave }: Props) {
+export function MeetingRoomView({
+  meetingTitle,
+  onMinimize,
+  onLeave,
+  noiseSuppressionMode,
+  onNoiseSuppressionModeChange,
+  noiseSuppressionEnabled: noiseSuppressionEnabledProp,
+  onNoiseSuppressionChange,
+}: Props) {
+  const noiseSuppressionEnabled =
+    noiseSuppressionEnabledProp ?? isNoiseSuppressionEnabled(noiseSuppressionMode);
   const c = useSemanticTheme();
   const { t } = useI18n();
   const m = t.meetings;
+  const { meetingId } = useLiveMeeting();
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const blurTargetRef = useRef<View>(null);
@@ -98,35 +104,10 @@ export function MeetingRoomView({ meetingTitle, onLeave }: Props) {
     isScreenShareEnabled,
   } = useLocalParticipant();
   const participants = useParticipants();
-
-  const [chatOpen, setChatOpen] = useState(false);
-  const [chatDraft, setChatDraft] = useState('');
-  const listRef = useRef<FlatList<ChatRow>>(null);
-  const cameraPromptedRef = useRef(false);
-
-  const { chatMessages, send: sendChat } = useChat();
-
-  useEffect(() => {
-    void AudioSession.startAudioSession();
-    return () => {
-      void AudioSession.stopAudioSession();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (connectionState !== ConnectionState.Connected) return;
-    if (cameraPromptedRef.current) return;
-    cameraPromptedRef.current = true;
-    Alert.alert(m.cameraPromptTitle, m.cameraPromptMessage, [
-      { text: m.cameraPromptNo, style: 'cancel' },
-      {
-        text: m.cameraPromptYes,
-        onPress: () => {
-          void localParticipant.setCameraEnabled(true);
-        },
-      },
-    ]);
-  }, [connectionState, localParticipant, m]);
+  const applyNoiseSuppression = useMeetingNoiseSuppressionApplier(
+    localParticipant,
+    isMicrophoneEnabled,
+  );
 
   const cameraTracks = useTracks(
     [{ source: Track.Source.Camera, withPlaceholder: true }],
@@ -154,34 +135,35 @@ export function MeetingRoomView({ meetingTitle, onLeave }: Props) {
   const tileWidth = width >= 700 ? (width - 48) / 3 : (width - 40) / 2;
   const controlsBottom = Math.max(insets.bottom, 12) + 64;
 
-  const chatRows = useMemo((): ChatRow[] => {
-    return chatMessages.map((msg, index) => {
-      const fromId = msg.from?.identity ?? '?';
-      const displayName =
-        msg.from?.name?.trim() ||
-        (fromId === localParticipant.identity ? m.roomYou : fromId);
-      return {
-        id: `${msg.timestamp}-${index}`,
-        fromId,
-        displayName,
-        text: msg.message,
-        timestamp: msg.timestamp,
-        isSelf: fromId === localParticipant.identity,
-      };
+  const openChat = useCallback(() => {
+    if (!meetingId) return;
+    router.push({
+      pathname: '/meetings/[id]/chat',
+      params: { id: meetingId },
     });
-  }, [chatMessages, localParticipant.identity, m.roomYou]);
-
-  const handleSendChat = useCallback(() => {
-    const text = chatDraft.trim();
-    if (!text) return;
-    sendChat(text);
-    setChatDraft('');
-    requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
-  }, [chatDraft, sendChat]);
+  }, [meetingId]);
 
   const toggleMic = useCallback(async () => {
-    await localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled);
-  }, [localParticipant, isMicrophoneEnabled]);
+    const next = !isMicrophoneEnabled;
+    await localParticipant.setMicrophoneEnabled(
+      next,
+      buildMeetingAudioCaptureOptions(noiseSuppressionMode),
+    );
+  }, [localParticipant, isMicrophoneEnabled, noiseSuppressionMode]);
+
+  const toggleNoiseSuppression = useCallback(() => {
+    const nextMode = modeFromToggleEnabled(!noiseSuppressionEnabled, 'mobile');
+    onNoiseSuppressionModeChange(nextMode);
+    if (onNoiseSuppressionChange) {
+      onNoiseSuppressionChange(nextMode !== 'off');
+    }
+    void applyNoiseSuppression(nextMode);
+  }, [
+    applyNoiseSuppression,
+    noiseSuppressionEnabled,
+    onNoiseSuppressionChange,
+    onNoiseSuppressionModeChange,
+  ]);
 
   const toggleCam = useCallback(async () => {
     await localParticipant.setCameraEnabled(!isCameraEnabled);
@@ -209,8 +191,9 @@ export function MeetingRoomView({ meetingTitle, onLeave }: Props) {
         <View style={[styles.topBar, { paddingTop: insets.top + 8 }]}>
           <Pressable
             style={[styles.backBtn, { backgroundColor: c.surfaceSecondary }]}
-            onPress={onLeave}
+            onPress={onMinimize}
             hitSlop={10}
+            accessibilityLabel={m.collapseRoom}
           >
             <HugeiconsIcon icon={ArrowLeft01Icon} size={18} color={c.foreground} strokeWidth={2} />
           </Pressable>
@@ -279,6 +262,16 @@ export function MeetingRoomView({ meetingTitle, onLeave }: Props) {
           />
           <ControlButton
             tone={c}
+            active={noiseSuppressionEnabled}
+            onPress={() => toggleNoiseSuppression()}
+            iconOn={AudioWave01Icon}
+            iconOff={FilterHorizontalIcon}
+            label={
+              noiseSuppressionEnabled ? m.noiseSuppressionOn : m.noiseSuppressionOff
+            }
+          />
+          <ControlButton
+            tone={c}
             active={isCameraEnabled}
             onPress={() => void toggleCam()}
             iconOn={VideoReplayIcon}
@@ -297,8 +290,8 @@ export function MeetingRoomView({ meetingTitle, onLeave }: Props) {
           ) : null}
           <ControlButton
             tone={c}
-            active={chatOpen}
-            onPress={() => setChatOpen((v) => !v)}
+            active={false}
+            onPress={openChat}
             iconOn={BubbleChatIcon}
             iconOff={BubbleChatIcon}
             label={m.chat}
@@ -312,142 +305,7 @@ export function MeetingRoomView({ meetingTitle, onLeave }: Props) {
           </Pressable>
         </View>
       </BlurTargetView>
-
-      <BottomSheet isOpen={chatOpen} onOpenChange={setChatOpen}>
-          <BottomSheet.Portal>
-            <BottomSheet.Overlay />
-            <AppBottomSheetContent
-              snapPoints={[...CHAT_SHEET_SNAP_POINTS]}
-              contentContainerClassName="p-0"
-              keyboardBehavior="interactive"
-              android_keyboardInputMode="adjustResize"
-            >
-              <View style={styles.chatSheetInner}>
-                <View style={styles.chatSheetHeader}>
-                  <Text style={[styles.chatSheetTitle, { color: c.foreground }]}>{m.chatTitle}</Text>
-                  <Pressable
-                    onPress={() => setChatOpen(false)}
-                    style={[styles.chatCloseBtn, { backgroundColor: c.surfaceSecondary }]}
-                    hitSlop={8}
-                  >
-                    <HugeiconsIcon icon={Cancel01Icon} size={16} color={c.foreground} strokeWidth={1.9} />
-                  </Pressable>
-                </View>
-                <FlatList
-                  ref={listRef}
-                  data={chatRows}
-                  keyExtractor={(item) => item.id}
-                  style={styles.chatList}
-                  contentContainerStyle={styles.chatListContent}
-                  showsVerticalScrollIndicator={false}
-                  keyboardShouldPersistTaps="handled"
-                  renderItem={({ item, index }) => {
-                    const prev = index > 0 ? chatRows[index - 1] : null;
-                    const showName = !prev || prev.fromId !== item.fromId;
-                    return (
-                      <MeetingChatBubble
-                        row={item}
-                        tone={c}
-                        showName={showName}
-                      />
-                    );
-                  }}
-                  onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
-                  ListEmptyComponent={
-                    <Text style={[styles.chatEmpty, { color: c.muted }]}>{t.chats.noMessages}</Text>
-                  }
-                />
-                <View style={[styles.chatComposer, { borderTopColor: c.border, backgroundColor: c.surface }]}>
-                  <TextInput
-                    value={chatDraft}
-                    onChangeText={setChatDraft}
-                    placeholder={m.chatPlaceholder}
-                    placeholderTextColor={c.muted}
-                    style={[
-                      styles.chatInput,
-                      {
-                        color: c.foreground,
-                        backgroundColor: c.surfaceSecondary,
-                        borderColor: c.border,
-                      },
-                    ]}
-                    multiline
-                    maxLength={2000}
-                    onSubmitEditing={() => handleSendChat()}
-                  />
-                  <Pressable
-                    onPress={() => handleSendChat()}
-                    disabled={!chatDraft.trim()}
-                    style={[
-                      styles.chatSendBtn,
-                      {
-                        backgroundColor: chatDraft.trim() ? c.accent : c.surfaceSecondary,
-                      },
-                    ]}
-                    accessibilityLabel={t.chats.send}
-                  >
-                    <HugeiconsIcon
-                      icon={SentIcon}
-                      size={18}
-                      color={chatDraft.trim() ? c.accentForeground : c.muted}
-                      strokeWidth={2}
-                    />
-                  </Pressable>
-                </View>
-              </View>
-            </AppBottomSheetContent>
-          </BottomSheet.Portal>
-        </BottomSheet>
     </View>
-  );
-}
-
-function MeetingChatBubble({
-  row,
-  tone,
-  showName,
-}: {
-  row: ChatRow;
-  tone: SemanticTheme;
-  showName: boolean;
-}) {
-  const accent = tone.accent;
-  return (
-    <Animated.View
-      entering={FadeInDown.duration(180)}
-      style={[styles.chatRow, row.isSelf ? styles.chatRowSelf : styles.chatRowPeer]}
-    >
-      <View
-        style={[
-          styles.chatBubble,
-          row.isSelf
-            ? {
-                backgroundColor: accent,
-                borderTopRightRadius: 6,
-                borderColor: accent + '55',
-              }
-            : {
-                backgroundColor: tone.surfaceSecondary,
-                borderTopLeftRadius: 6,
-                borderColor: tone.border,
-              },
-        ]}
-      >
-        {showName ? (
-          <Text
-            style={[
-              styles.chatName,
-              { color: row.isSelf ? 'rgba(255,255,255,0.75)' : tone.muted },
-            ]}
-          >
-            {row.displayName}
-          </Text>
-        ) : null}
-        <Text style={[styles.chatBody, { color: row.isSelf ? '#fff' : tone.foreground }]}>
-          {row.text}
-        </Text>
-      </View>
-    </Animated.View>
   );
 }
 
@@ -478,8 +336,12 @@ function ParticipantTile({
   );
   const { isMuted: micMuted } = useTrackMutedIndicator(micRef);
 
-  const displayName = participantDisplayName(name, identity, fallbackLabel);
-  const initials = chatInitials(displayName);
+  const { displayName, initials } = useMeetingParticipantDisplayName(
+    identity,
+    name,
+    trackRef.participant.isLocal,
+    fallbackLabel,
+  );
   const avatarColor = chatColorFromId(identity);
   const showVideo = hasActiveVideo(trackRef);
   const height = large ? 220 : 148;
@@ -595,25 +457,8 @@ function ControlButton({
   );
 }
 
-export const MEETING_ROOM_OPTIONS = {
-  adaptiveStream: true,
-  dynacast: true,
-  disconnectOnPageLeave: false,
-  audioCaptureDefaults: {
-    autoGainControl: true,
-    echoCancellation: true,
-    noiseSuppression: true,
-  },
-  publishDefaults: {
-    videoEncoding: VideoPresets.h540.encoding,
-    videoSimulcastLayers: [VideoPresets.h216],
-    simulcast: true,
-    degradationPreference: 'balanced' as const,
-  },
-  videoCaptureDefaults: {
-    resolution: VideoPresets.h540.resolution,
-  },
-};
+/** @deprecated Use buildMeetingRoomOptions from @/lib/meeting-audio */
+export const MEETING_ROOM_OPTIONS = buildMeetingRoomOptions('webrtc');
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
@@ -756,86 +601,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: 4,
-  },
-  chatSheetInner: {
-    flex: 1,
-    minHeight: 200,
-    paddingHorizontal: 4,
-    paddingBottom: 8,
-  },
-  chatSheetHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 12,
-    paddingBottom: 10,
-  },
-  chatSheetTitle: {
-    fontSize: SigmaTypo.headline,
-    fontWeight: '700',
-  },
-  chatCloseBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  chatList: { flex: 1 },
-  chatListContent: {
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingBottom: 12,
-    flexGrow: 1,
-  },
-  chatEmpty: {
-    textAlign: 'center',
-    fontSize: SigmaTypo.bodySmall,
-    paddingVertical: 24,
-  },
-  chatComposer: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 10,
-    paddingHorizontal: 12,
-    paddingTop: 10,
-    paddingBottom: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
-  chatInput: {
-    flex: 1,
-    minHeight: 44,
-    maxHeight: 120,
-    borderRadius: 22,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    fontSize: SigmaTypo.bodySmall,
-  },
-  chatSendBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  chatRow: { maxWidth: '86%' },
-  chatRowSelf: { alignSelf: 'flex-end' },
-  chatRowPeer: { alignSelf: 'flex-start' },
-  chatBubble: {
-    borderRadius: 18,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  chatName: {
-    fontSize: 10,
-    fontWeight: '700',
-    marginBottom: 3,
-    letterSpacing: 0.2,
-  },
-  chatBody: {
-    fontSize: SigmaTypo.bodySmall,
-    lineHeight: 20,
   },
 });

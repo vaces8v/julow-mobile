@@ -6,13 +6,7 @@ import { useSemanticTheme } from '@/hooks/use-semantic-theme';
 import { useI18n } from '@/i18n/context';
 import { formatAppDate } from '@/i18n/format';
 import type { Translations } from '@/i18n/translations';
-import {
-  api,
-  type ProjectPayload,
-  type TaskDetailPayload,
-  type TaskPayload,
-  type WorkflowStatusPayload,
-} from '@/lib/api';
+import { api, type ProjectPayload, type TaskDetailPayload, type TaskPayload, type WorkflowStatusPayload } from '@/lib/api';
 import { cachedApi } from '@/lib/cache/cached-api';
 import { useCacheSync } from '@/lib/cache/use-cache-sync';
 import {
@@ -333,7 +327,7 @@ export default function ProjectDetailScreen() {
   const progressStyle = useAnimatedStyle(() => ({ width: `${progress.value * 100}%` as any }));
 
   const projColor = project?.color || '#3b82f6';
-  const projInitials = project?.icon ?? project?.name?.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase() ?? '??';
+  const projInitials = project?.icon ?? project?.name?.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase() ?? t.projectDetail.unknownInitial;
   const selectedTask = tasks.find(t => t.id === selectedId);
 
   // Open task from search / notification deep link
@@ -396,7 +390,7 @@ export default function ProjectDetailScreen() {
           <Text style={styles.projectKey}>{projInitials}</Text>
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={[styles.projectName, { color: c.foreground }]} numberOfLines={1}>{project?.name ?? 'Project'}</Text>
+          <Text style={[styles.projectName, { color: c.foreground }]} numberOfLines={1}>{project?.name ?? t.projectDetail.fallbackTitle}</Text>
           <View style={styles.progressRow}>
             <Text style={[styles.progressMeta, { color: c.muted }]}>{tasks.length} {t.common.tasks.toLowerCase()} · {pct}%</Text>
             <View style={[styles.progressTrack, { backgroundColor: c.border, width: 80 }]}>
@@ -411,7 +405,7 @@ export default function ProjectDetailScreen() {
             const col = FALLBACK_COLORS[i % FALLBACK_COLORS.length];
             return (
               <View key={m.id} style={[styles.memberAv, { backgroundColor: col, marginLeft: i > 0 ? -7 : 0, borderColor: c.background }]}>
-                <Text style={styles.memberInitial}>{m.name?.[0]?.toUpperCase() ?? '?'}</Text>
+                <Text style={styles.memberInitial}>{m.name?.[0]?.toUpperCase() ?? t.projectDetail.unknownMember}</Text>
               </View>
             );
           })}
@@ -513,7 +507,8 @@ export default function ProjectDetailScreen() {
       )}
 
       {/* Task detail bottom sheet (Hero UI) */}
-      <BottomSheet isOpen={detailSheetOpen} onOpenChange={(v) => { setDetailSheetOpen(v); if (!v) setSelectedId(null); }}>
+      {detailSheetOpen && selectedTask ? (
+      <BottomSheet isOpen onOpenChange={(v) => { setDetailSheetOpen(v); if (!v) setSelectedId(null); }}>
         <BottomSheet.Portal>
           <BottomSheet.Overlay />
           <AppBottomSheetContent
@@ -522,7 +517,6 @@ export default function ProjectDetailScreen() {
             enableHandlePanningGesture
             enableContentPanningGesture
           >
-            {selectedTask && (
               <TaskDetail
                 task={selectedTask}
                 statuses={statuses}
@@ -530,10 +524,10 @@ export default function ProjectDetailScreen() {
                 onStatusChange={handleStatusChange}
                 onRequestClose={() => { setDetailSheetOpen(false); setSelectedId(null); }}
               />
-            )}
           </AppBottomSheetContent>
         </BottomSheet.Portal>
       </BottomSheet>
+      ) : null}
 
       {project ? (
         <TaskCreateSheet
@@ -648,7 +642,7 @@ function TaskCard({ task, selected, onPress, statusColor }: {
           )}
           {task.assignee && (
             <View style={[styles.assigneeAv, { backgroundColor: '#6b7280', marginLeft: 'auto' }]}>
-              <Text style={styles.assigneeInitial}>{typeof task.assignee === 'string' ? task.assignee[0].toUpperCase() : '?'}</Text>
+              <Text style={styles.assigneeInitial}>{typeof task.assignee === 'string' ? task.assignee[0].toUpperCase() : t.projectDetail.unknownMember}</Text>
             </View>
           )}
         </View>
@@ -681,7 +675,7 @@ function TaskListRow({ task, statusMap, selected, onPress }: {
         <Text style={[styles.statusChipText, { color: sm.color }]} numberOfLines={1}>{statusLabel}</Text>
       </View>
       <Text style={[styles.listCell, { color: pm.color }]}>{pm.label}</Text>
-      <Text style={[styles.listCell, { color: c.muted }]}>{task.dueDate ? formatAppDate(task.dueDate, locale, 'dayMonth') : '—'}</Text>
+      <Text style={[styles.listCell, { color: c.muted }]}>{task.dueDate ? formatAppDate(task.dueDate, locale, 'dayMonth') : t.projectDetail.noDue}</Text>
     </Pressable>
   );
 }
@@ -854,7 +848,9 @@ function TaskDetail({ task, statuses, statusMap, onStatusChange, onRequestClose 
               </View>
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={[styles.fileName, { color: c.foreground }]} numberOfLines={1}>{a.filename}</Text>
-                <Text style={[styles.fileSize, { color: c.muted }]}>{(a.sizeBytes / 1024).toFixed(0)} KB</Text>
+                <Text style={[styles.fileSize, { color: c.muted }]}>
+                  {t.projectDetail.fileSizeKb.replace('{size}', (a.sizeBytes / 1024).toFixed(0))}
+                </Text>
               </View>
               <HugeiconsIcon icon={Download04Icon} size={16} color={c.accent} strokeWidth={2} />
             </Pressable>

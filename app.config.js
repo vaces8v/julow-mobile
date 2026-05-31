@@ -7,7 +7,7 @@ const PROD_LIVEKIT_URL = 'wss://livekit.julow.ru';
 module.exports = {
   expo: {
     ...appJson.expo,
-    name: 'JULOW',
+    name: 'Julow',
     newArchEnabled: false,
     ios: {
       ...appJson.expo.ios,
@@ -18,7 +18,7 @@ module.exports = {
     },
     android: {
       ...appJson.expo.android,
-      label: 'JULOW',
+      label: 'Julow',
       usesCleartextTraffic: true,
       permissions: [
         'INTERNET',

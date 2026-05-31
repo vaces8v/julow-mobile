@@ -1,10 +1,9 @@
-import { MeetingRoomView, MEETING_ROOM_OPTIONS } from '@/components/meetings/meeting-room-view';
+import { MeetingPreJoinView } from '@/components/meetings/meeting-prejoin-view';
+import { MeetingRoomView } from '@/components/meetings/meeting-room-view';
 import { useLiveMeeting } from '@/contexts/live-meeting-context';
-import { ensureLiveKitGlobals } from '@/lib/livekit-setup';
 import { useSemanticTheme } from '@/hooks/use-semantic-theme';
 import { useI18n } from '@/i18n/context';
 import { api } from '@/lib/api';
-import { LiveKitRoom } from '@livekit/react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, StatusBar, StyleSheet, Text, View } from 'react-native';
@@ -18,30 +17,60 @@ export default function MeetingRoomScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const meetingId = Array.isArray(params.id) ? params.id[0] : params.id;
 
-  const { token, serverUrl, join, leave } = useLiveMeeting();
+  const {
+    meetingId: activeMeetingId,
+    token,
+    enteredCall,
+    meetingTitle,
+    micEnabled,
+    camEnabled,
+    noiseSuppressionMode,
+    noiseSuppressionEnabled,
+    join,
+    leave,
+    enterCall,
+    setMeetingTitle,
+    setMicEnabled,
+    setCamEnabled,
+    setNoiseSuppressionMode,
+    setNoiseSuppressionEnabled,
+  } = useLiveMeeting();
+
   const joinRef = useRef(join);
   const leaveRef = useRef(leave);
   joinRef.current = join;
   leaveRef.current = leave;
 
-  const [title, setTitle] = useState('');
-  const [joining, setJoining] = useState(true);
+  const [preparing, setPreparing] = useState(true);
   const [failed, setFailed] = useState(false);
-
   const joinAttemptRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (token) ensureLiveKitGlobals();
-  }, [token]);
+    if (!meetingId) return;
+
+    if (activeMeetingId && activeMeetingId !== meetingId) {
+      leaveRef.current();
+    }
+  }, [meetingId, activeMeetingId]);
 
   useEffect(() => {
     if (!meetingId) return;
+
+    if (activeMeetingId === meetingId && token) {
+      setPreparing(false);
+      setFailed(false);
+      void api.getMeeting(meetingId).then((meeting) => {
+        if (meeting?.title) setMeetingTitle(meeting.title);
+      });
+      return;
+    }
+
     if (joinAttemptRef.current === meetingId) return;
     joinAttemptRef.current = meetingId;
 
     let cancelled = false;
     void (async () => {
-      setJoining(true);
+      setPreparing(true);
       setFailed(false);
       try {
         const [meeting, ok] = await Promise.all([
@@ -49,12 +78,12 @@ export default function MeetingRoomScreen() {
           joinRef.current(meetingId),
         ]);
         if (cancelled) return;
-        if (meeting?.title) setTitle(meeting.title);
+        if (meeting?.title) setMeetingTitle(meeting.title);
         setFailed(!ok);
       } catch {
         if (!cancelled) setFailed(true);
       } finally {
-        if (!cancelled) setJoining(false);
+        if (!cancelled) setPreparing(false);
       }
     })();
 
@@ -63,9 +92,8 @@ export default function MeetingRoomScreen() {
       if (joinAttemptRef.current === meetingId) {
         joinAttemptRef.current = null;
       }
-      leaveRef.current();
     };
-  }, [meetingId]);
+  }, [meetingId, activeMeetingId, token, setMeetingTitle]);
 
   const handleLeave = useCallback(() => {
     leave();
@@ -76,6 +104,34 @@ export default function MeetingRoomScreen() {
     }
   }, [leave]);
 
+  const handleMinimize = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/meetings');
+    }
+  }, []);
+
+  const handlePreJoinCancel = useCallback(() => {
+    leave();
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/meetings');
+    }
+  }, [leave]);
+
+  const handleJoinCall = useCallback(() => {
+    enterCall();
+  }, [enterCall]);
+
+  const handleNoiseSuppressionModeChange = useCallback(
+    (mode: import('@/lib/meeting-audio').NoiseSuppressionMode) => {
+      setNoiseSuppressionMode(mode);
+    },
+    [setNoiseSuppressionMode],
+  );
+
   if (!meetingId) {
     return (
       <View style={[styles.center, { backgroundColor: c.background }]}>
@@ -84,12 +140,12 @@ export default function MeetingRoomScreen() {
     );
   }
 
-  if (joining || !token) {
+  if (preparing || !token) {
     return (
       <View style={[styles.center, { backgroundColor: c.background, paddingTop: insets.top }]}>
         <StatusBar barStyle={c.scheme === 'dark' ? 'light-content' : 'dark-content'} />
         <ActivityIndicator color={c.accent} size="large" />
-        <Text style={[styles.hint, { color: c.muted }]}>{m.joiningTitle}</Text>
+        <Text style={[styles.hint, { color: c.muted }]}>{m.preparingTitle}</Text>
       </View>
     );
   }
@@ -98,26 +154,44 @@ export default function MeetingRoomScreen() {
     return (
       <View style={[styles.center, { backgroundColor: c.background, paddingTop: insets.top }]}>
         <Text style={[styles.hint, { color: c.foreground }]}>{m.joinFailed}</Text>
-        <Text style={[styles.link, { color: c.accent }]} onPress={handleLeave}>
+        <Text style={[styles.link, { color: c.accent }]} onPress={handlePreJoinCancel}>
           {t.common.back}
         </Text>
       </View>
     );
   }
 
+  if (!enteredCall) {
+    return (
+      <>
+        <StatusBar barStyle={c.scheme === 'dark' ? 'light-content' : 'dark-content'} />
+        <MeetingPreJoinView
+          meetingTitle={meetingTitle || m.stageLabel}
+          micEnabled={micEnabled}
+          camEnabled={camEnabled}
+          noiseSuppressionEnabled={noiseSuppressionEnabled}
+          onMicChange={setMicEnabled}
+          onCamChange={setCamEnabled}
+          onNoiseSuppressionChange={setNoiseSuppressionEnabled}
+          onJoin={handleJoinCall}
+          onCancel={handlePreJoinCancel}
+        />
+      </>
+    );
+  }
+
   return (
     <View style={[styles.fill, { backgroundColor: c.background }]}>
       <StatusBar barStyle={c.scheme === 'dark' ? 'light-content' : 'dark-content'} />
-      <LiveKitRoom
-        serverUrl={serverUrl}
-        token={token}
-        connect
-        audio
-        video={false}
-        options={MEETING_ROOM_OPTIONS}
-      >
-        <MeetingRoomView meetingTitle={title || m.stageLabel} onLeave={handleLeave} />
-      </LiveKitRoom>
+      <MeetingRoomView
+        meetingTitle={meetingTitle || m.stageLabel}
+        onMinimize={handleMinimize}
+        onLeave={handleLeave}
+        noiseSuppressionMode={noiseSuppressionMode}
+        onNoiseSuppressionModeChange={handleNoiseSuppressionModeChange}
+        noiseSuppressionEnabled={noiseSuppressionEnabled}
+        onNoiseSuppressionChange={setNoiseSuppressionEnabled}
+      />
     </View>
   );
 }

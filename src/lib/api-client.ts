@@ -22,6 +22,11 @@ const API_BASE_URL = resolveApiBaseUrl();
 const ACCESS_TOKEN_KEY = 'julow.access_token';
 const REFRESH_TOKEN_KEY = 'julow.refresh_token';
 const USER_SNAPSHOT_KEY = 'julow.user_snapshot';
+const SESSION_RESERVE_UNTIL_KEY = 'julow.session_reserve_until';
+
+/** Grace window for offline profile when tokens were cleared unexpectedly. */
+const SESSION_RESERVE_DAYS = 7;
+const ACCESS_TOKEN_REFRESH_BUFFER_MS = 60_000;
 
 /** Mobile clients always use long-lived remember-me sessions on the backend. */
 const MOBILE_DEFAULT_REMEMBER_ME = true;
@@ -54,6 +59,8 @@ export async function getUserSnapshot(): Promise<UserSnapshot | null> {
 
 export async function setUserSnapshot(user: UserSnapshot): Promise<void> {
   await SecureStore.setItemAsync(USER_SNAPSHOT_KEY, JSON.stringify(user));
+  const reserveUntil = Date.now() + SESSION_RESERVE_DAYS * 24 * 60 * 60 * 1000;
+  await SecureStore.setItemAsync(SESSION_RESERVE_UNTIL_KEY, String(reserveUntil));
 }
 
 export async function setTokens(access: string, refresh: string): Promise<void> {
@@ -61,15 +68,67 @@ export async function setTokens(access: string, refresh: string): Promise<void> 
   await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, refresh);
 }
 
-export async function clearTokens(): Promise<void> {
+/** Removes only bearer tokens — keeps cached profile for offline / reserve recovery. */
+export async function clearAuthTokens(): Promise<void> {
   await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY);
   await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
+}
+
+/** Full sign-out wipe: tokens, profile snapshot, and reserve window. */
+export async function clearAllAuthState(): Promise<void> {
+  await clearAuthTokens();
   await SecureStore.deleteItemAsync(USER_SNAPSHOT_KEY);
+  await SecureStore.deleteItemAsync(SESSION_RESERVE_UNTIL_KEY);
+}
+
+/** @deprecated Prefer clearAuthTokens or clearAllAuthState explicitly. */
+export async function clearTokens(): Promise<void> {
+  await clearAllAuthState();
+}
+
+async function getSessionReserveUntil(): Promise<number | null> {
+  const raw = await SecureStore.getItemAsync(SESSION_RESERVE_UNTIL_KEY);
+  if (!raw) return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export async function isReserveSessionValid(): Promise<boolean> {
+  const snapshot = await getUserSnapshot();
+  if (!snapshot) return false;
+  const until = await getSessionReserveUntil();
+  return until !== null && Date.now() < until;
 }
 
 export async function hasStoredSession(): Promise<boolean> {
   const [access, refresh] = await Promise.all([getAccessToken(), getRefreshToken()]);
   return !!(access || refresh);
+}
+
+/** True when tokens exist or a recent cached profile is within the reserve window. */
+export async function hasRestorableSession(): Promise<boolean> {
+  if (await hasStoredSession()) return true;
+  return isReserveSessionValid();
+}
+
+function decodeJwtExpiryMs(token: string): number | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+    const payload = JSON.parse(globalThis.atob(padded)) as { exp?: unknown };
+    if (typeof payload.exp === 'number') return payload.exp * 1000;
+  } catch {
+    /* ignore malformed token */
+  }
+  return null;
+}
+
+function isAccessTokenExpired(token: string, bufferMs = ACCESS_TOKEN_REFRESH_BUFFER_MS): boolean {
+  const expMs = decodeJwtExpiryMs(token);
+  if (expMs === null) return false;
+  return Date.now() >= expMs - bufferMs;
 }
 
 // ── Error class ──────────────────────────────────────────────────
@@ -296,7 +355,7 @@ async function tryRefreshToken(): Promise<RefreshOutcome> {
 
       if (!res.ok) {
         if (res.status === 401 || res.status === 403) {
-          await clearTokens();
+          await clearAuthTokens();
           emitAuthFailure(
             new ApiError(res.status, 'SESSION_EXPIRED', 'Session expired', {}, {
               url: `${API_BASE_URL}/auth/refresh`,
@@ -325,14 +384,18 @@ async function tryRefreshToken(): Promise<RefreshOutcome> {
   return refreshPromise;
 }
 
-/** Ensures a valid access token is available — refreshes silently when needed. */
+/** Ensures a valid access token is available — refreshes when missing or near expiry. */
 export async function ensureFreshAccessToken(): Promise<string | null> {
   const existing = await getAccessToken();
-  if (existing) return existing;
+  if (existing && !isAccessTokenExpired(existing)) return existing;
+
+  const refreshToken = await getRefreshToken();
+  if (!refreshToken) return existing;
 
   const outcome = await tryRefreshToken();
-  if (outcome !== 'refreshed') return null;
-  return getAccessToken();
+  if (outcome === 'refreshed') return getAccessToken();
+  if (outcome === 'unavailable') return existing;
+  return null;
 }
 
 async function apiFetch<T>(path: string, options: FetchOptions = {}): Promise<T> {
@@ -413,7 +476,7 @@ async function apiFetch<T>(path: string, options: FetchOptions = {}): Promise<T>
         refreshOutcome === 'invalid' ||
         (refreshOutcome === 'unavailable' && !(await getRefreshToken()));
       if (sessionDead) {
-        await clearTokens();
+        await clearAuthTokens();
         emitAuthFailure(err);
       }
     }
@@ -521,7 +584,7 @@ export async function apiPostMultipart<T>(
         refreshOutcome === 'invalid' ||
         (refreshOutcome === 'unavailable' && !(await getRefreshToken()));
       if (sessionDead) {
-        await clearTokens();
+        await clearAuthTokens();
         emitAuthFailure(err);
       }
     }
@@ -628,7 +691,7 @@ export async function authRegister(payload: {
 export async function authLogout(): Promise<void> {
   // Backend has no /auth/logout — sessions are revoked via DELETE /account/sessions/{id}.
   // Local token wipe is sufficient for mobile sign-out.
-  await clearTokens();
+  await clearAllAuthState();
 }
 
 /** Confirm web QR login — caller must already be authenticated on mobile. */

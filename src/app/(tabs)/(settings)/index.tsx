@@ -4,6 +4,10 @@ import { SigmaRadius, SigmaTypo } from '@/constants/sigma';
 import { useAuth } from '@/contexts/auth-context';
 import { useRouter } from 'expo-router';
 import { useWorkspace } from '@/contexts/workspace-context';
+import { usePushNotificationsPreference } from '@/contexts/push-notifications-context';
+import { useCollapsibleHeaderScroll } from '@/hooks/use-collapsible-header-scroll';
+import { useCollapsibleHeaderStyles } from '@/hooks/use-collapsible-header-styles';
+import { useCollapsibleRefreshControl } from '@/hooks/use-collapsible-refresh-control';
 import { useSemanticTheme } from '@/hooks/use-semantic-theme';
 import { useI18n, type Locale } from '@/i18n/context';
 import {
@@ -14,15 +18,18 @@ import {
   type WorkspaceMemberPayload,
   type WorkspacePayload,
 } from '@/lib/api';
+import { getLightRaisedCardStyle } from '@/lib/theme-surfaces';
 import {
   Logout01Icon,
+  BookOpen02Icon,
+  Notification01Icon,
   PaintBrush01Icon,
   QrCodeScanIcon,
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react-native';
 import { Button, Switch as ThemedSwitch } from 'heroui-native';
 import { BlurTargetView } from 'expo-blur';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Appearance,
@@ -36,13 +43,7 @@ import {
   View,
   useColorScheme,
 } from 'react-native';
-import Animated, {
-  Extrapolation,
-  interpolate,
-  useAnimatedScrollHandler,
-  useAnimatedStyle,
-  useSharedValue,
-} from 'react-native-reanimated';
+import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 type Section = 'general' | 'account' | 'members';
@@ -75,9 +76,22 @@ export default function SettingsScreen() {
   const [darkMode, setDarkMode] = useState(scheme === 'dark');
   const [profile, setProfile] = useState<ProfilePayload | null>(null);
   const [profileLoading, setProfileLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const scrollRef = useRef<Animated.ScrollView>(null);
-  const scrollY = useSharedValue(0);
+  const loadProfile = useCallback(async (options?: { showLoading?: boolean }) => {
+    const showLoading = options?.showLoading ?? true;
+    if (showLoading) setProfileLoading(true);
+    try {
+      const payload = await api.getMyProfile();
+      setProfile(payload);
+    } catch {
+      setProfile(null);
+    } finally {
+      if (showLoading) setProfileLoading(false);
+    }
+  }, []);
+
+  const { scrollRef, headerProgress, scrollHandler, resetScroll } = useCollapsibleHeaderScroll('settings');
 
   const activeWorkspace: WorkspacePayload | undefined = useMemo(
     () => workspaces.find((w) => w.id === activeWorkspaceId),
@@ -95,10 +109,10 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('tabPress', (tab) => {
-      if (tab === '(settings)') scrollRef.current?.scrollTo({ y: 0, animated: true });
+      if (tab === '(settings)') resetScroll();
     });
     return () => sub.remove();
-  }, []);
+  }, [resetScroll]);
 
   useEffect(() => {
     let cancelled = false;
@@ -110,28 +124,25 @@ export default function SettingsScreen() {
     return () => { cancelled = true; };
   }, []);
 
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([refreshAll(), loadProfile({ showLoading: false })]);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refreshAll, loadProfile]);
+
+  const refreshControl = useCollapsibleRefreshControl({ refreshing, onRefresh, c });
+
   const handleDarkModeChange = (val: boolean) => {
     setDarkMode(val);
     Appearance.setColorScheme(val ? 'dark' : 'light');
   };
 
-  const scrollHandler = useAnimatedScrollHandler({ onScroll: (e) => { scrollY.value = e.contentOffset.y; } });
   const HEADER_H = insets.top + 54;
-
-  const headerBgStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [10, 50], [0, 1], Extrapolation.CLAMP),
-  }));
-  const headerTitleStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [30, 60], [0, 1], Extrapolation.CLAMP),
-    transform: [{ translateY: interpolate(scrollY.value, [30, 60], [12, 0], Extrapolation.CLAMP) }],
-  }));
-  const largeTitleStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [0, 40], [1, 0], Extrapolation.CLAMP),
-    transform: [
-      { scale: interpolate(scrollY.value, [-50, 0, 40], [1.04, 1, 0.94], Extrapolation.CLAMP) },
-      { translateY: interpolate(scrollY.value, [0, 40], [0, -10], Extrapolation.CLAMP) },
-    ],
-  }));
+  const { headerBgStyle, smallTitleStyle: headerTitleStyle, largeTitleStyle } =
+    useCollapsibleHeaderStyles(headerProgress);
 
   return (
     <View style={{ flex: 1, backgroundColor: c.background }}>
@@ -164,6 +175,7 @@ export default function SettingsScreen() {
               paddingBottom: insets.bottom + 100,
               paddingHorizontal: 20,
             }}
+            refreshControl={refreshControl}
           >
             <Animated.View style={[styles.largeTitleWrap, largeTitleStyle]}>
               <Text style={[styles.largeTitle, { color: c.foreground }]}>{s.title}</Text>
@@ -171,7 +183,14 @@ export default function SettingsScreen() {
             </Animated.View>
 
             <Fade delay={0} initialY={8} style={{ marginBottom: 16 }}>
-              <View style={[styles.card, { backgroundColor: c.surface, borderColor: c.border }]}>
+              <View
+                style={[
+                  styles.card,
+                  c.scheme === 'light'
+                    ? getLightRaisedCardStyle(c)
+                    : { backgroundColor: c.surface, borderColor: c.border },
+                ]}
+              >
                 <View style={styles.profileRow}>
                   <View style={[styles.avatarLarge, { backgroundColor: c.accent + '22' }]}>
                     <Text style={[styles.avatarLetter, { color: c.accent }]}>
@@ -195,6 +214,26 @@ export default function SettingsScreen() {
                 <HugeiconsIcon icon={QrCodeScanIcon} size={18} color={c.accentForeground} strokeWidth={2} />
                 <Button.Label>{s.scanQrLogin}</Button.Label>
               </Button>
+            </Fade>
+
+            <Fade delay={25} initialY={6} style={{ marginBottom: 16 }}>
+              <Pressable
+                onPress={() => router.push('/docs')}
+                style={[
+                  styles.docsRow,
+                  c.scheme === 'light'
+                    ? getLightRaisedCardStyle(c)
+                    : { backgroundColor: c.surface, borderColor: c.border },
+                ]}>
+                <View style={[styles.sectionIconWrap, { backgroundColor: c.accent + '18' }]}>
+                  <HugeiconsIcon icon={BookOpen02Icon} size={16} color={c.accent} strokeWidth={1.8} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.docsTitle, { color: c.foreground }]}>{t.docs.title}</Text>
+                  <Text style={[styles.docsDesc, { color: c.muted }]}>{t.docs.subtitle}</Text>
+                </View>
+                <Text style={[styles.docsChevron, { color: c.muted }]}>›</Text>
+              </Pressable>
             </Fade>
 
             <Fade delay={30} initialY={6} style={{ marginBottom: 16 }}>
@@ -229,7 +268,14 @@ export default function SettingsScreen() {
             </Fade>
 
             <Fade delay={50} initialY={6} key={activeTab}>
-              <View style={[styles.panel, { backgroundColor: c.surface, borderColor: c.border }]}>
+              <View
+                style={[
+                  styles.panel,
+                  c.scheme === 'light'
+                    ? { ...getLightRaisedCardStyle(c), borderWidth: 1 }
+                    : { backgroundColor: c.surface, borderColor: c.border },
+                ]}
+              >
                 {activeTab === 'general' && (
                   <GeneralSection
                     workspaceName={activeWorkspace?.name ?? ''}
@@ -349,6 +395,17 @@ function GeneralSection({
           ))}
         </View>
       </Field>
+
+      <View style={[styles.sectionDivider, { backgroundColor: c.separator }]} />
+
+      <View style={styles.sectionLabel}>
+        <View style={[styles.sectionIconWrap, { backgroundColor: c.accent + '18' }]}>
+          <HugeiconsIcon icon={Notification01Icon} size={13} color={c.accent} strokeWidth={1.8} />
+        </View>
+        <Text style={[styles.sectionTitle, { color: c.muted }]}>{s.notifTitle.toUpperCase()}</Text>
+      </View>
+
+      <PushNotificationsSwitchRow />
 
       <View style={[styles.sectionDivider, { backgroundColor: c.separator }]} />
 
@@ -752,16 +809,42 @@ function SaveRow({
   );
 }
 
+function PushNotificationsSwitchRow() {
+  const { t } = useI18n();
+  const s = t.settings;
+  const p = s.push;
+  const { isPushEnabled, permissionState, isBusy, setPushEnabled } = usePushNotificationsPreference();
+
+  const desc =
+    permissionState === 'denied'
+      ? p.deniedDesc
+      : permissionState === 'undetermined'
+        ? p.undeterminedDesc
+        : p.desc;
+
+  return (
+    <SwitchRow
+      title={p.title}
+      desc={desc}
+      value={isPushEnabled}
+      disabled={isBusy}
+      onChange={(next) => void setPushEnabled(next)}
+    />
+  );
+}
+
 function SwitchRow({
   title,
   desc,
   value,
   onChange,
+  disabled = false,
 }: {
   title: string;
   desc?: string;
   value: boolean;
   onChange: (v: boolean) => void;
+  disabled?: boolean;
 }) {
   const c = useSemanticTheme();
   return (
@@ -770,7 +853,7 @@ function SwitchRow({
         <Text style={[styles.rowTitle, { color: c.foreground }]}>{title}</Text>
         {!!desc && <Text style={[styles.rowDesc, { color: c.muted }]}>{desc}</Text>}
       </View>
-      <ThemedSwitch isSelected={value} onSelectedChange={onChange} />
+      <ThemedSwitch isSelected={value} onSelectedChange={onChange} isDisabled={disabled} />
     </View>
   );
 }
@@ -878,6 +961,18 @@ const styles = StyleSheet.create({
   previewEmail: { fontSize: SigmaTypo.caption, fontWeight: '500', marginTop: 2 },
 
   qrScanWrap: { alignItems: 'center', marginBottom: 16 },
+
+  docsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 14,
+    borderRadius: SigmaRadius.lg,
+    borderWidth: 1,
+  },
+  docsTitle: { fontSize: SigmaTypo.bodySmall, fontWeight: '700' },
+  docsDesc: { fontSize: SigmaTypo.captionSmall, fontWeight: '500', marginTop: 2, lineHeight: 16 },
+  docsChevron: { fontSize: 22, fontWeight: '300' },
 
   sessionRow: {
     flexDirection: 'row',

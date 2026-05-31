@@ -17,7 +17,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Linking,
-  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -32,8 +31,9 @@ import Animated, {
   interpolateColor,
   runOnUI,
   type SharedValue,
-  useAnimatedProps,
   useAnimatedStyle,
+  useDerivedValue,
+  useFrameCallback,
   useSharedValue,
   withRepeat,
   withSequence,
@@ -41,7 +41,6 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Defs, Mask, Rect } from 'react-native-svg';
 
 const SCANNER_BG = '#0b1020';
 const FRAME_RADIUS = 14;
@@ -50,17 +49,23 @@ const CORNER_THICK = 3;
 const FRAME_PAD = 14;
 const MIN_TRACK = 96;
 const MAX_TRACK = 300;
-const LOCK_DELAY_MS = 420;
+/** Brief frame snap before lock; must not reset on repeated barcode events. */
+const LOCK_DELAY_MS = 120;
 const LOST_DELAY_MS = 1400;
-const SUCCESS_FLASH_MS = 480;
+const SUCCESS_FLASH_MS = 360;
 
-const SPRING = { damping: 28, stiffness: 220, mass: 0.9, overshootClamping: true };
 const SPRING_SNAP = { damping: 20, stiffness: 300, mass: 0.8, overshootClamping: true };
-const TRACK_INTERVAL_MS = 33;
+const TRACK_LERP = 0.32;
+const IDLE_LERP = 0.18;
+const TRACKING_RAMP = 0.12;
+const TRACKING_DECAY = 0.08;
+const REST_POS_EPS = 0.25;
+const REST_SCALE_EPS = 0.002;
 
 type Rect = { x: number; y: number; width: number; height: number };
 
 function clamp(n: number, min: number, max: number) {
+  'worklet';
   return Math.min(Math.max(n, min), max);
 }
 
@@ -134,20 +139,57 @@ function triggerDetectHaptic() {
   }
 }
 
-function applyRect(
-  frameX: SharedValue<number>,
-  frameY: SharedValue<number>,
-  frameW: SharedValue<number>,
-  frameH: SharedValue<number>,
+function rectToTarget(rect: Rect, baseSize: number) {
+  'worklet';
+  return {
+    cx: rect.x + rect.width / 2,
+    cy: rect.y + rect.height / 2,
+    scale: clamp(rect.width / baseSize, MIN_TRACK / baseSize, MAX_TRACK / baseSize),
+  };
+}
+
+function setTargetFromRect(
+  targetCX: SharedValue<number>,
+  targetCY: SharedValue<number>,
+  targetScale: SharedValue<number>,
+  trackingActive: SharedValue<number>,
   rect: Rect,
-  snap = false,
+  baseSize: number,
 ) {
   'worklet';
-  const cfg = snap ? SPRING_SNAP : SPRING;
-  frameX.value = withSpring(rect.x, cfg);
-  frameY.value = withSpring(rect.y, cfg);
-  frameW.value = withSpring(rect.width, cfg);
-  frameH.value = withSpring(rect.height, cfg);
+  const next = rectToTarget(rect, baseSize);
+  targetCX.value = next.cx;
+  targetCY.value = next.cy;
+  targetScale.value = next.scale;
+  trackingActive.value = 1;
+}
+
+function resetTargetIdle(
+  targetCX: SharedValue<number>,
+  targetCY: SharedValue<number>,
+  targetScale: SharedValue<number>,
+  trackingActive: SharedValue<number>,
+  baseFrame: Rect,
+) {
+  'worklet';
+  targetCX.value = baseFrame.x + baseFrame.width / 2;
+  targetCY.value = baseFrame.y + baseFrame.height / 2;
+  targetScale.value = 1;
+  trackingActive.value = 0;
+}
+
+function snapFrameInstant(
+  frameCX: SharedValue<number>,
+  frameCY: SharedValue<number>,
+  frameScale: SharedValue<number>,
+  targetCX: SharedValue<number>,
+  targetCY: SharedValue<number>,
+  targetScale: SharedValue<number>,
+) {
+  'worklet';
+  frameCX.value = targetCX.value;
+  frameCY.value = targetCY.value;
+  frameScale.value = targetScale.value;
 }
 
 function BracketCorner({
@@ -199,50 +241,74 @@ function BracketCorner({
   );
 }
 
-const AnimatedSvgRect = Animated.createAnimatedComponent(Rect);
-
 function ScannerDimOverlay({
   screenW,
-  screenH,
-  frameX,
-  frameY,
-  frameW,
-  frameH,
+  overlayH,
+  navBarFill,
+  frameCX,
+  frameCY,
+  frameScale,
+  baseSize,
 }: {
   screenW: number;
-  screenH: number;
-  frameX: SharedValue<number>;
-  frameY: SharedValue<number>;
-  frameW: SharedValue<number>;
-  frameH: SharedValue<number>;
+  /** Full drawable height including Android system nav bar. */
+  overlayH: number;
+  navBarFill: number;
+  frameCX: SharedValue<number>;
+  frameCY: SharedValue<number>;
+  frameScale: SharedValue<number>;
+  baseSize: number;
 }) {
-  const cutoutProps = useAnimatedProps(() => ({
-    x: frameX.value,
-    y: frameY.value,
-    width: frameW.value,
-    height: frameH.value,
+  const dim = 'rgba(11, 16, 32, 0.78)';
+
+  const holeHalf = useDerivedValue(() => (baseSize * frameScale.value) / 2);
+  const holeTop = useDerivedValue(() => frameCY.value - holeHalf.value);
+  const holeBottom = useDerivedValue(() => frameCY.value + holeHalf.value);
+  const holeLeft = useDerivedValue(() => frameCX.value - holeHalf.value);
+  const holeRight = useDerivedValue(() => frameCX.value + holeHalf.value);
+  const holeHeight = useDerivedValue(() => baseSize * frameScale.value);
+
+  const topStyle = useAnimatedStyle(() => ({
+    height: Math.max(0, holeTop.value),
+  }));
+
+  const bottomStyle = useAnimatedStyle(() => ({
+    top: holeBottom.value,
+    height: Math.max(0, overlayH - holeBottom.value),
+  }));
+
+  const leftStyle = useAnimatedStyle(() => ({
+    top: holeTop.value,
+    width: Math.max(0, holeLeft.value),
+    height: holeHeight.value,
+  }));
+
+  const rightStyle = useAnimatedStyle(() => ({
+    top: holeTop.value,
+    left: holeRight.value,
+    width: Math.max(0, screenW - holeRight.value),
+    height: holeHeight.value,
   }));
 
   return (
-    <Svg width={screenW} height={screenH} style={StyleSheet.absoluteFill} pointerEvents="none">
-      <Defs>
-        <Mask id="qrScannerCutout">
-          <Rect width={screenW} height={screenH} fill="white" />
-          <AnimatedSvgRect
-            animatedProps={cutoutProps}
-            fill="black"
-            rx={FRAME_RADIUS}
-            ry={FRAME_RADIUS}
-          />
-        </Mask>
-      </Defs>
-      <Rect
-        width={screenW}
-        height={screenH}
-        fill="rgba(11, 16, 32, 0.78)"
-        mask="url(#qrScannerCutout)"
-      />
-    </Svg>
+    <View style={[styles.dimRoot, { width: screenW, height: overlayH }]} pointerEvents="none">
+      <Animated.View style={[styles.dimPanel, { width: screenW, backgroundColor: dim }, topStyle]} />
+      <Animated.View style={[styles.dimPanel, { width: screenW, backgroundColor: dim }, bottomStyle]} />
+      <Animated.View style={[styles.dimPanel, { backgroundColor: dim }, leftStyle]} />
+      <Animated.View style={[styles.dimPanel, { backgroundColor: dim }, rightStyle]} />
+      {navBarFill > 0 ? (
+        <View
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: navBarFill,
+            backgroundColor: dim,
+          }}
+        />
+      ) : null}
+    </View>
   );
 }
 
@@ -337,28 +403,70 @@ export function QrScannerScreen() {
   const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lostTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingTokenRef = useRef<string | null>(null);
-  const lastTrackAtRef = useRef(0);
+  const lockingTokenRef = useRef<string | null>(null);
   const lastRectRef = useRef<Rect | null>(null);
 
-  const applyFrameRect = (rect: Rect, snap = false) => {
-    runOnUI(applyRect)(frameX, frameY, frameW, frameH, rect, snap);
-  };
+  const overlayH = screenH + insets.bottom;
 
   const baseFrame = useMemo(() => defaultFrame(screenW, screenH), [screenW, screenH]);
+  const baseSize = baseFrame.width;
 
-  const frameX = useSharedValue(baseFrame.x);
-  const frameY = useSharedValue(baseFrame.y);
-  const frameW = useSharedValue(baseFrame.width);
-  const frameH = useSharedValue(baseFrame.height);
+  const targetCX = useSharedValue(baseFrame.x + baseSize / 2);
+  const targetCY = useSharedValue(baseFrame.y + baseSize / 2);
+  const targetScale = useSharedValue(1);
+  const trackingActive = useSharedValue(0);
+
+  const frameCX = useSharedValue(baseFrame.x + baseSize / 2);
+  const frameCY = useSharedValue(baseFrame.y + baseSize / 2);
+  const frameScale = useSharedValue(1);
   const tracking = useSharedValue(0);
   const locked = useSharedValue(0);
   const successT = useSharedValue(0);
   const scanLineT = useSharedValue(0);
   const idlePulse = useSharedValue(0);
 
+  useFrameCallback(() => {
+    'worklet';
+    const trackingOn = trackingActive.value > 0.5;
+    const lerpFactor = trackingOn ? TRACK_LERP : IDLE_LERP;
+
+    const cx = frameCX.value;
+    const cy = frameCY.value;
+    const sc = frameScale.value;
+    const dcx = targetCX.value - cx;
+    const dcy = targetCY.value - cy;
+    const dsc = targetScale.value - sc;
+    const dist2 = dcx * dcx + dcy * dcy;
+    const atRest = dist2 <= REST_POS_EPS * REST_POS_EPS && Math.abs(dsc) <= REST_SCALE_EPS;
+    const tr = tracking.value;
+
+    if (!trackingOn && atRest && tr <= 0) {
+      return;
+    }
+
+    if (!atRest) {
+      frameCX.value = cx + dcx * lerpFactor;
+      frameCY.value = cy + dcy * lerpFactor;
+      frameScale.value = sc + dsc * lerpFactor;
+    } else {
+      frameCX.value = targetCX.value;
+      frameCY.value = targetCY.value;
+      frameScale.value = targetScale.value;
+    }
+
+    if (trackingOn) {
+      if (tr < 1) tracking.value = Math.min(1, tr + TRACKING_RAMP);
+    } else if (tr > 0) {
+      tracking.value = Math.max(0, tr - TRACKING_DECAY);
+    }
+  });
+
   useEffect(() => {
-    applyFrameRect(baseFrame, true);
-  }, [baseFrame]);
+    runOnUI(resetTargetIdle)(targetCX, targetCY, targetScale, trackingActive, baseFrame);
+    frameCX.value = baseFrame.x + baseSize / 2;
+    frameCY.value = baseFrame.y + baseSize / 2;
+    frameScale.value = 1;
+  }, [baseFrame, baseSize, frameCX, frameCY, frameScale, targetCX, targetCY, targetScale, trackingActive]);
 
   useEffect(() => {
     scanLineT.value = withRepeat(
@@ -380,12 +488,16 @@ export function QrScannerScreen() {
     };
   }, [idlePulse, scanLineT]);
 
-  const frameContainerStyle = useAnimatedStyle(() => ({
-    left: frameX.value,
-    top: frameY.value,
-    width: frameW.value,
-    height: frameH.value,
-  }));
+  const frameContainerStyle = useAnimatedStyle(() => {
+    const half = baseSize / 2;
+    return {
+      transform: [
+        { translateX: frameCX.value - half },
+        { translateY: frameCY.value - half },
+        { scale: frameScale.value },
+      ],
+    };
+  });
 
   const cornerColorStyle = useAnimatedStyle(() => {
     const tracked = interpolateColor(
@@ -405,35 +517,37 @@ export function QrScannerScreen() {
   }));
 
   const scanLineStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: frameH.value * 0.08 + frameH.value * 0.72 * scanLineT.value }],
+    transform: [{ translateY: baseSize * 0.08 + baseSize * 0.72 * scanLineT.value }],
     opacity: locked.value > 0.5 || successT.value > 0.2 ? 0 : 0.55,
   }));
 
   const resetToIdle = () => {
-    tracking.value = withTiming(0, { duration: 180 });
     locked.value = withTiming(0, { duration: 180 });
     successT.value = withTiming(0, { duration: 180 });
-    applyFrameRect(baseFrame);
+    runOnUI(resetTargetIdle)(targetCX, targetCY, targetScale, trackingActive, baseFrame);
   };
 
   const scheduleLostReset = () => {
     if (lostTimerRef.current) clearTimeout(lostTimerRef.current);
     lostTimerRef.current = setTimeout(() => {
-      if (scannedRef.current || pendingTokenRef.current) return;
+      if (scannedRef.current || pendingTokenRef.current || lockingTokenRef.current) return;
       resetToIdle();
     }, LOST_DELAY_MS);
   };
 
   const finalizeDetect = (token: string) => {
+    if (lockTimerRef.current) {
+      clearTimeout(lockTimerRef.current);
+      lockTimerRef.current = null;
+    }
+    lockingTokenRef.current = token;
     triggerDetectHaptic();
     locked.value = withSpring(1, SPRING_SNAP);
     successT.value = withSpring(1, SPRING_SNAP);
     setShowSuccess(true);
-    setTimeout(() => {
-      setShowSuccess(false);
-      setPendingToken(token);
-      pendingTokenRef.current = token;
-    }, SUCCESS_FLASH_MS);
+    setPendingToken(token);
+    pendingTokenRef.current = token;
+    setTimeout(() => setShowSuccess(false), SUCCESS_FLASH_MS);
   };
 
   const onBarcode = (result: BarcodeScanningResult) => {
@@ -441,21 +555,8 @@ export function QrScannerScreen() {
 
     const rect = extractQrRect(result, screenW, screenH);
     if (rect) {
-      const now = Date.now();
-      const prev = lastRectRef.current;
-      const movedEnough =
-        !prev ||
-        Math.abs(prev.x - rect.x) > 2 ||
-        Math.abs(prev.y - rect.y) > 2 ||
-        Math.abs(prev.width - rect.width) > 2 ||
-        Math.abs(prev.height - rect.height) > 2;
-
-      if (movedEnough && now - lastTrackAtRef.current >= TRACK_INTERVAL_MS) {
-        lastTrackAtRef.current = now;
-        lastRectRef.current = rect;
-        applyFrameRect(rect);
-      }
-      tracking.value = withTiming(1, { duration: 160 });
+      lastRectRef.current = rect;
+      runOnUI(setTargetFromRect)(targetCX, targetCY, targetScale, trackingActive, rect, baseSize);
     }
 
     scheduleLostReset();
@@ -463,13 +564,24 @@ export function QrScannerScreen() {
     const token = parseQrLoginToken(result.data);
     if (!token) return;
 
-    if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
-    lockTimerRef.current = setTimeout(() => {
-      if (scannedRef.current || pendingTokenRef.current) return;
-      scannedRef.current = true;
-      if (rect) applyFrameRect(rect, true);
-      finalizeDetect(token);
-    }, LOCK_DELAY_MS);
+    if (lockingTokenRef.current === token || pendingTokenRef.current === token) return;
+
+    if (!lockingTokenRef.current) {
+      lockingTokenRef.current = token;
+      if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
+      lockTimerRef.current = setTimeout(() => {
+        lockTimerRef.current = null;
+        if (scannedRef.current || pendingTokenRef.current) return;
+        if (lockingTokenRef.current !== token) return;
+        scannedRef.current = true;
+        const lockRect = lastRectRef.current ?? rect;
+        if (lockRect) {
+          runOnUI(setTargetFromRect)(targetCX, targetCY, targetScale, trackingActive, lockRect, baseSize);
+          runOnUI(snapFrameInstant)(frameCX, frameCY, frameScale, targetCX, targetCY, targetScale);
+        }
+        finalizeDetect(token);
+      }, LOCK_DELAY_MS);
+    }
   };
 
   useEffect(() => {
@@ -490,6 +602,7 @@ export function QrScannerScreen() {
       setError(q.confirmFailed);
       scannedRef.current = false;
       pendingTokenRef.current = null;
+      lockingTokenRef.current = null;
       setPendingToken(null);
       resetToIdle();
     } finally {
@@ -500,10 +613,13 @@ export function QrScannerScreen() {
   const handleCancelConfirm = () => {
     scannedRef.current = false;
     pendingTokenRef.current = null;
+    lockingTokenRef.current = null;
     setPendingToken(null);
     setError(null);
     resetToIdle();
   };
+
+  const sheetBottomPad = Math.max(insets.bottom, 16) + 16;
 
   const scanningEnabled = !pendingToken && !showSuccess;
 
@@ -542,14 +658,18 @@ export function QrScannerScreen() {
 
       <ScannerDimOverlay
         screenW={screenW}
-        screenH={screenH}
-        frameX={frameX}
-        frameY={frameY}
-        frameW={frameW}
-        frameH={frameH}
+        overlayH={overlayH}
+        navBarFill={insets.bottom}
+        frameCX={frameCX}
+        frameCY={frameCY}
+        frameScale={frameScale}
+        baseSize={baseSize}
       />
 
-      <Animated.View style={[styles.frameContainer, frameContainerStyle]} pointerEvents="none">
+      <Animated.View
+        style={[styles.frameContainer, { width: baseSize, height: baseSize }, frameContainerStyle]}
+        pointerEvents="none"
+      >
         <BracketCorner position="tl" pulse={cornerPulseStyle} cornerColor={cornerColorStyle} />
         <BracketCorner position="tr" pulse={cornerPulseStyle} cornerColor={cornerColorStyle} flipH />
         <BracketCorner position="bl" pulse={cornerPulseStyle} cornerColor={cornerColorStyle} flipV />
@@ -569,9 +689,24 @@ export function QrScannerScreen() {
         </View>
       </View>
 
-      <Modal visible={!!pendingToken} transparent animationType="slide">
-        <View style={styles.sheetBackdrop}>
-          <View style={[styles.sheet, { backgroundColor: c.surface }]}>
+      {pendingToken ? (
+        <View
+          style={[styles.sheetBackdrop, { height: overlayH }]}
+          pointerEvents="box-none"
+        >
+          <Pressable
+            style={StyleSheet.absoluteFillObject}
+            onPress={handleCancelConfirm}
+            disabled={confirming}
+            accessibilityRole="button"
+            accessibilityLabel={q.confirmCancel}
+          />
+          <View
+            style={[
+              styles.sheet,
+              { backgroundColor: c.surface, paddingBottom: sheetBottomPad },
+            ]}
+          >
             <Text style={[styles.sheetTitle, { color: c.foreground }]}>{q.confirmTitle}</Text>
             <Text style={[styles.sheetBody, { color: c.muted }]}>{q.confirmBody}</Text>
             {error ? <Text style={[styles.sheetError, { color: c.danger }]}>{error}</Text> : null}
@@ -592,7 +727,7 @@ export function QrScannerScreen() {
             </Pressable>
           </View>
         </View>
-      </Modal>
+      ) : null}
     </View>
   );
 }
@@ -602,7 +737,18 @@ const styles = StyleSheet.create({
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   frameContainer: {
     position: 'absolute',
+    left: 0,
+    top: 0,
     borderRadius: FRAME_RADIUS,
+  },
+  dimRoot: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+  },
+  dimPanel: {
+    position: 'absolute',
+    left: 0,
   },
   cornerTL: { position: 'absolute', top: 0, left: 0 },
   cornerTR: { position: 'absolute', top: 0, right: 0 },
@@ -749,15 +895,20 @@ const styles = StyleSheet.create({
   permissionBtn: { alignSelf: 'stretch' },
   permissionLink: { marginTop: 18, alignItems: 'center' },
   sheetBackdrop: {
-    flex: 1,
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
     justifyContent: 'flex-end',
     backgroundColor: 'rgba(0,0,0,0.55)',
+    zIndex: 10,
   },
   sheet: {
+    width: '100%',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    padding: 24,
-    paddingBottom: 36,
+    paddingHorizontal: 24,
+    paddingTop: 24,
     gap: 12,
   },
   sheetTitle: { fontSize: 20, fontWeight: '700' },

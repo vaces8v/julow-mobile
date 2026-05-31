@@ -23,6 +23,7 @@ function formatPreviewTime(iso: string, locale: 'ru' | 'en' | 'de'): string {
 
 type ChatListRowProps = {
   chat: ChatPayload;
+  title: string;
   locale: 'ru' | 'en' | 'de';
   onPress: () => void;
   directLabel: string;
@@ -34,6 +35,7 @@ type ChatListRowProps = {
 
 export const ChatListRow = React.memo(function ChatListRow({
   chat,
+  title,
   locale,
   onPress,
   directLabel,
@@ -45,7 +47,7 @@ export const ChatListRow = React.memo(function ChatListRow({
   const c = useSemanticTheme();
 
   const isDm = chat.chatType === 'dm';
-  const chatName = chat.name ?? (isDm ? 'Direct Message' : 'Group');
+  const chatName = title;
   const memberCount = chat.members?.length ?? 0;
   const hasUnread = unreadCount > 0;
   const metaLabel = isDm ? directLabel : membersLabel(memberCount);

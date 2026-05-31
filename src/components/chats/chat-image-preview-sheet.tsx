@@ -134,8 +134,10 @@ export function ChatImagePreviewSheet({
 }: ChatImagePreviewSheetProps) {
   const sheetOpen = open && !!source;
 
+  if (!sheetOpen) return null;
+
   return (
-    <BottomSheet isOpen={sheetOpen} onOpenChange={onOpenChange}>
+    <BottomSheet isOpen onOpenChange={onOpenChange}>
       <BottomSheet.Portal>
         <BottomSheet.Overlay />
         <AppBottomSheetContent
@@ -187,8 +189,10 @@ export function ChatLinkConfirmSheet({
 }: ChatLinkConfirmSheetProps) {
   const sheetOpen = open && !!url;
 
+  if (!sheetOpen) return null;
+
   return (
-    <BottomSheet isOpen={sheetOpen} onOpenChange={(v) => { if (!v) onCancel(); }}>
+    <BottomSheet isOpen onOpenChange={(v) => { if (!v) onCancel(); }}>
       <BottomSheet.Portal>
         <BottomSheet.Overlay />
         <AppBottomSheetContent size="compact">

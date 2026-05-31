@@ -5,12 +5,17 @@ import { Fade } from '@/components/ui/fade';
 import { SigmaRadius, SigmaTypo } from '@/constants/sigma';
 import { useAuth } from '@/contexts/auth-context';
 import { useWorkspace } from '@/contexts/workspace-context';
+import { useChatMemberProfiles } from '@/hooks/use-chat-member-profiles';
+import { useCollapsibleHeaderScroll } from '@/hooks/use-collapsible-header-scroll';
+import { useCollapsibleHeaderStyles } from '@/hooks/use-collapsible-header-styles';
+import { useCollapsibleRefreshControl } from '@/hooks/use-collapsible-refresh-control';
 import { useSemanticTheme } from '@/hooks/use-semantic-theme';
 import { useI18n } from '@/i18n/context';
 import { api, type ChatPayload } from '@/lib/api';
 import { cachedApi } from '@/lib/cache/cached-api';
 import { useCacheSync } from '@/lib/cache/use-cache-sync';
 import { subscribeWsEvent } from '@/lib/ws-client';
+import { getScreenTopGlowStops } from '@/lib/theme-surfaces';
 import { Search01Icon } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react-native';
 import { BlurTargetView } from 'expo-blur';
@@ -27,13 +32,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import Animated, {
-  Extrapolation,
-  interpolate,
-  useAnimatedScrollHandler,
-  useAnimatedStyle,
-  useSharedValue,
-} from 'react-native-reanimated';
+import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 function sortChats(list: ChatPayload[], unreadMap: Record<string, number>): ChatPayload[] {
@@ -54,6 +53,7 @@ export default function ChatsListScreen() {
   const { user } = useAuth();
   const blurTargetRef = useRef<View>(null);
   const { activeWorkspaceId } = useWorkspace();
+  const { resolveDmChatTitle } = useChatMemberProfiles(activeWorkspaceId, user?.id);
   const insets = useSafeAreaInsets();
   const cc = t.chats;
 
@@ -63,9 +63,11 @@ export default function ChatsListScreen() {
   );
   const [unreadMap, setUnreadMap] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const loadChats = useCallback(async (options?: { showLoading?: boolean }) => {
+  const loadChats = useCallback(async (options?: { showLoading?: boolean; force?: boolean }) => {
     const showLoading = options?.showLoading ?? true;
+    const force = options?.force ?? false;
     if (!user) {
       setChats([]);
       setUnreadMap({});
@@ -75,8 +77,8 @@ export default function ChatsListScreen() {
     if (showLoading) setLoading(true);
     try {
       const list = activeWorkspaceId
-        ? await cachedApi.getChats(activeWorkspaceId)
-        : await cachedApi.listChats();
+        ? await cachedApi.getChats(activeWorkspaceId, { force })
+        : await cachedApi.listChats({ force });
 
       setChats(sortChats(list, {}));
 
@@ -144,34 +146,26 @@ export default function ChatsListScreen() {
     return unsub;
   }, [loadChats]);
 
-  const scrollY = useSharedValue(0);
-  const scrollHandler = useAnimatedScrollHandler({
-    onScroll: (e) => {
-      scrollY.value = e.contentOffset.y;
-    },
-  });
-  const HEADER_H = insets.top + 54;
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await loadChats({ showLoading: false, force: true });
+    } finally {
+      setRefreshing(false);
+    }
+  }, [loadChats]);
 
-  const headerBgStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [10, 50], [0, 1], Extrapolation.CLAMP),
-  }));
-  const smallTitleStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [30, 60], [0, 1], Extrapolation.CLAMP),
-    transform: [{ translateY: interpolate(scrollY.value, [30, 60], [10, 0], Extrapolation.CLAMP) }],
-  }));
-  const largeTitleStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [0, 40], [1, 0], Extrapolation.CLAMP),
-    transform: [
-      { scale: interpolate(scrollY.value, [-50, 0, 40], [1.04, 1, 0.94], Extrapolation.CLAMP) },
-      { translateY: interpolate(scrollY.value, [0, 40], [0, -10], Extrapolation.CLAMP) },
-    ],
-  }));
+  const refreshControl = useCollapsibleRefreshControl({ refreshing, onRefresh, c });
+
+  const { scrollRef, headerProgress, scrollHandler } = useCollapsibleHeaderScroll('chats');
+  const HEADER_H = insets.top + 54;
+  const { headerBgStyle, smallTitleStyle, largeTitleStyle } = useCollapsibleHeaderStyles(headerProgress);
 
   const visibleChats = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return chats;
-    return chats.filter((ch) => (ch.name ?? '').toLowerCase().includes(q));
-  }, [chats, query]);
+    return chats.filter((ch) => resolveDmChatTitle(ch).toLowerCase().includes(q));
+  }, [chats, query, resolveDmChatTitle]);
 
   const totalUnread = useMemo(
     () => Object.values(unreadMap).reduce((sum, n) => sum + n, 0),
@@ -206,6 +200,7 @@ export default function ChatsListScreen() {
     ({ item, index }: { item: ChatPayload; index: number }) => (
       <ChatListRow
         chat={item}
+        title={resolveDmChatTitle(item)}
         locale={locale}
         onPress={() => openChat(item.id)}
         directLabel={cc.directLabel}
@@ -215,7 +210,7 @@ export default function ChatsListScreen() {
         showDivider={index < visibleChats.length - 1}
       />
     ),
-    [locale, cc.directLabel, membersLabel, unreadPreview, unreadMap, visibleChats.length, openChat],
+    [locale, cc.directLabel, membersLabel, unreadPreview, unreadMap, visibleChats.length, openChat, resolveDmChatTitle],
   );
 
   return (
@@ -223,7 +218,7 @@ export default function ChatsListScreen() {
       <StatusBar barStyle={c.scheme === 'dark' ? 'light-content' : 'dark-content'} />
 
       <LinearGradient
-        colors={[c.accent + '10', 'transparent']}
+        colors={getScreenTopGlowStops(c.scheme, c.accent)}
         style={styles.topGlow}
         pointerEvents="none"
       />
@@ -255,6 +250,7 @@ export default function ChatsListScreen() {
 
       <BlurTargetView ref={blurTargetRef} style={{ flex: 1 }} collapsable={false}>
         <Animated.ScrollView
+          ref={scrollRef}
           onScroll={scrollHandler}
           scrollEventThrottle={16}
           showsVerticalScrollIndicator={false}
@@ -264,6 +260,7 @@ export default function ChatsListScreen() {
             paddingHorizontal: 16,
             gap: 12,
           }}
+          refreshControl={refreshControl}
         >
           <Animated.View style={[styles.largeTitleWrap, largeTitleStyle]}>
             <View style={{ flex: 1 }}>

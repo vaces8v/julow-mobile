@@ -11,9 +11,9 @@
  * Mount once at the root (after auth). Does nothing if the WS is not active.
  */
 
-import { router } from 'expo-router';
 import { useEffect } from 'react';
 
+import { navigateFromNotificationData } from '@/lib/notification-navigation';
 import { useI18n } from '@/i18n/context';
 import { getActiveChatId } from '@/lib/active-chat';
 import { subscribeWsEvent } from '@/lib/ws-client';
@@ -74,16 +74,13 @@ export function useNotificationToasts({ enabled }: { enabled: boolean }): void {
       if (isChatMessage && chatId && getActiveChatId() === chatId) return;
 
       const goTo = () => {
-        if (chatId) {
-          router.push(`/chat/${chatId}`);
-          return;
-        }
-        if (projectId) {
-          router.push(`/project/${projectId}`);
-          return;
-        }
-        // Fallback — open the notifications screen.
-        router.push('/notifications');
+        void navigateFromNotificationData({
+          notification_type: p.notification_type,
+          chat_id: chatId,
+          project_id: projectId,
+          task_id: taskId,
+          data: p.data,
+        });
       };
 
       showToast({

@@ -6,6 +6,7 @@ import Animated, {
     useDerivedValue,
 } from 'react-native-reanimated';
 import { AnimatedBlurView } from '@/components/animated-blur-view';
+import { getSheetBackdrop } from '@/lib/theme-surfaces';
 import { type RefObject } from 'react';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
@@ -18,7 +19,8 @@ export const BottomSheetBlurOverlay = ({ blurTarget }: Props) => {
     const { isOpen, onOpenChange } = useBottomSheet();
     const { progress } = useBottomSheetAnimation();
     const scheme = useColorScheme();
-    const isDark = scheme === 'dark';
+    const isDark = scheme !== 'light';
+    const backdrop = getSheetBackdrop(isDark ? 'dark' : 'light');
 
     const blurIntensity = useDerivedValue(() => {
         return interpolate(progress.get(), [0, 1, 2], [0, 40, 0]);
@@ -27,7 +29,7 @@ export const BottomSheetBlurOverlay = ({ blurTarget }: Props) => {
     const fallbackStyle = useAnimatedStyle(() => {
         const opacity = interpolate(progress.get(), [0, 1, 2], [0, 1, 0]);
         return {
-            backgroundColor: isDark ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.35)',
+            backgroundColor: backdrop,
             opacity,
         };
     });
@@ -45,7 +47,7 @@ export const BottomSheetBlurOverlay = ({ blurTarget }: Props) => {
                 <AnimatedBlurView
                     blurIntensity={blurIntensity}
                     blurTarget={blurTarget}
-                    tint="dark"
+                    tint={isDark ? 'dark' : 'light'}
                     style={StyleSheet.absoluteFill}
                 />
             ) : (

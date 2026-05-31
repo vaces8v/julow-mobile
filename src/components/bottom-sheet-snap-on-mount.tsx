@@ -1,4 +1,5 @@
-import { useBottomSheet } from '@gorhom/bottom-sheet';
+import { useBottomSheet as useGorhomBottomSheet } from '@gorhom/bottom-sheet';
+import { useBottomSheet as useHeroBottomSheet } from 'heroui-native';
 import { useEffect } from 'react';
 import { InteractionManager } from 'react-native';
 
@@ -13,16 +14,22 @@ type BottomSheetSnapOnMountProps = {
  * `if (!open) return null` + `isOpen` already true skip that path — they stay at
  * minimum height until we snap here.
  *
+ * Must NOT snap while HeroUI isOpen is false — otherwise closed sheets peek open
+ * on screen mount (project entry, chat/comments navigation).
+ *
  * Retries: immediate, double rAF, after interactions, 150ms, 300ms, and onLayout
  * (via AppBottomSheetContent snapOnLayout).
  */
 export function BottomSheetSnapOnMount({ index = 0 }: BottomSheetSnapOnMountProps) {
-  const { snapToIndex, expand } = useBottomSheet();
+  const { isOpen } = useHeroBottomSheet();
+  const { snapToIndex, expand } = useGorhomBottomSheet();
 
   useEffect(() => {
+    if (!isOpen) return;
+
     let cancelled = false;
     const snap = () => {
-      if (cancelled) return;
+      if (cancelled || !isOpen) return;
       try {
         snapToIndex(index);
       } catch {
@@ -50,7 +57,7 @@ export function BottomSheetSnapOnMount({ index = 0 }: BottomSheetSnapOnMountProp
       clearTimeout(retry150);
       clearTimeout(retry300);
     };
-  }, [index, snapToIndex, expand]);
+  }, [index, isOpen, snapToIndex, expand]);
 
   return null;
 }

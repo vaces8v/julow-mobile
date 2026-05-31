@@ -11,6 +11,12 @@ import { LiveMeetingProvider } from '@/contexts/live-meeting-context';
 import { CacheSyncProvider } from '@/lib/cache/cache-provider';
 import { WorkspaceProvider } from '@/contexts/workspace-context';
 import { useNotificationToasts } from '@/hooks/use-notification-toasts';
+import { usePushNotifications } from '@/hooks/use-push-notifications';
+import {
+  PushNotificationsProvider,
+  usePushNotificationsPreference,
+} from '@/contexts/push-notifications-context';
+import { handleColdStartNotification } from '@/lib/push-notifications';
 import { I18nProvider } from '@/i18n/context';
 import { startWsClient, stopWsClient } from '@/lib/ws-client';
 import { HeroUINativeProvider } from 'heroui-native';
@@ -85,7 +91,15 @@ function AuthGate() {
     }
   }, [isAuthenticated, isLoading, router, rootSegment]);
 
+  const { isPushEnabled, isReady: isPushReady } = usePushNotificationsPreference();
+
   useNotificationToasts({ enabled: isAuthenticated && !isLoading });
+  usePushNotifications({ enabled: isAuthenticated && !isLoading && isPushReady && isPushEnabled });
+
+  useEffect(() => {
+    if (isLoading || !isAuthenticated) return;
+    void handleColdStartNotification();
+  }, [isAuthenticated, isLoading]);
 
   return null;
 }
@@ -136,6 +150,7 @@ function RootNavigator() {
         <Stack.Screen name="chat/[id]" options={{ headerShown: false, animation: 'ios_from_right' }} />
         <Stack.Screen name="meetings/index" options={{ headerShown: false, animation: 'ios_from_right' }} />
         <Stack.Screen name="meetings/[id]/room" options={{ headerShown: false, animation: 'fade' }} />
+        <Stack.Screen name="meetings/[id]/chat" options={{ headerShown: false, animation: 'ios_from_right' }} />
         <Stack.Screen name="metrics/[type]" options={{ headerShown: false, animation: 'default' }} />
         <Stack.Screen name="project/[id]" options={{ headerShown: false, animation: 'ios_from_right' }} />
         <Stack.Screen name="task/[id]/comments" options={{ headerShown: false, animation: 'ios_from_right' }} />
@@ -144,6 +159,7 @@ function RootNavigator() {
         <Stack.Screen name="documents" options={{ headerShown: false, animation: 'ios_from_right' }} />
         <Stack.Screen name="today" options={{ headerShown: false, animation: 'ios_from_right' }} />
         <Stack.Screen name="notifications" options={{ headerShown: false, animation: 'ios_from_right' }} />
+        <Stack.Screen name="docs" options={{ headerShown: false, animation: 'ios_from_right' }} />
       </Stack>
       <Toaster />
     </>
@@ -161,13 +177,15 @@ function AppProviders({ children }: { children: ReactNode }) {
   const tree = (
     <I18nProvider>
       <AuthProvider>
-        <CacheSyncProvider>
-          <WorkspaceProvider>
-            <LiveMeetingProvider>
-              <HeroUINativeProvider>{children}</HeroUINativeProvider>
-            </LiveMeetingProvider>
-          </WorkspaceProvider>
-        </CacheSyncProvider>
+        <PushNotificationsProvider>
+          <CacheSyncProvider>
+            <WorkspaceProvider>
+              <LiveMeetingProvider>
+                <HeroUINativeProvider>{children}</HeroUINativeProvider>
+              </LiveMeetingProvider>
+            </WorkspaceProvider>
+          </CacheSyncProvider>
+        </PushNotificationsProvider>
       </AuthProvider>
     </I18nProvider>
   );

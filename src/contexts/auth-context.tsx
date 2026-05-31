@@ -3,6 +3,7 @@
  * user state, and login/logout flows.
  */
 
+import NetInfo from '@react-native-community/netinfo';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 import {
@@ -10,9 +11,10 @@ import {
   authLogin,
   authLogout,
   authRegister,
-  clearTokens,
+  clearAllAuthState,
   ensureFreshAccessToken,
   getUserSnapshot,
+  hasRestorableSession,
   hasStoredSession,
   setUserSnapshot,
   subscribeAuthFailure,
@@ -21,7 +23,9 @@ import { signInWithOAuth, type MobileOAuthProvider } from '@/lib/oauth';
 import { apiGet } from '@/lib/api-client';
 import { clearDataCache } from '@/lib/cache/data-cache';
 import { clearMutationQueue } from '@/lib/cache/mutation-queue';
+import { scheduleSmartSyncOnReconnect } from '@/lib/cache/sync-engine';
 import { isDeviceOffline } from '@/lib/network-status';
+import { unregisterPushOnLogout } from '@/hooks/use-push-notifications';
 
 export interface AuthUser {
   id: string;
@@ -69,17 +73,17 @@ function isNetworkError(err: unknown): boolean {
   return err.status === 0 || err.status === 408 || err.code === 'NETWORK_ERROR' || err.code === 'TIMEOUT';
 }
 
-async function restoreOfflineUser(generation: number): Promise<boolean> {
+function isAuthError(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 401;
+}
+
+async function loadOfflineUser(): Promise<AuthUser | null> {
   const snapshot = await getUserSnapshot();
-  if (snapshot && generation === authGeneration.current) {
-    setUser(snapshot);
-    return true;
+  if (snapshot) return snapshot;
+  if (await hasStoredSession()) {
+    return { id: 'offline', email: '', status: 'active' };
   }
-  if ((await hasStoredSession()) && generation === authGeneration.current) {
-    setUser({ id: 'offline', email: snapshot?.email ?? '', status: 'active' });
-    return true;
-  }
-  return false;
+  return null;
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -88,9 +92,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isOffline, setIsOffline] = useState(false);
   const authGeneration = useRef(0);
 
+  const forceLogout = useCallback(async (generation: number) => {
+    if (generation !== authGeneration.current) return;
+    clearDataCache();
+    clearMutationQueue();
+    await clearAllAuthState();
+    setUser(null);
+    setIsOffline(false);
+  }, []);
+
+  const hydrateOfflineUser = useCallback(async (generation: number): Promise<boolean> => {
+    const offlineUser = await loadOfflineUser();
+    if (!offlineUser || generation !== authGeneration.current) return false;
+    setUser(offlineUser);
+    setIsOffline(true);
+    return true;
+  }, []);
+
+  const fetchAndPersistUser = useCallback(async (generation: number): Promise<boolean> => {
+    const res = await apiGet<BackendUser>('/account/me', undefined, {
+      timeoutMs: AUTH_BOOTSTRAP_TIMEOUT_MS,
+    });
+
+    if (generation !== authGeneration.current) return false;
+
+    const nextUser = mapBackendUser(res.data);
+    await persistUser(nextUser);
+    setUser(nextUser);
+    setIsOffline(false);
+    return true;
+  }, []);
+
   const restoreSession = useCallback(async (generation: number) => {
-    const hasSession = await hasStoredSession();
-    if (!hasSession || generation !== authGeneration.current) {
+    const canRestore = await hasRestorableSession();
+    if (!canRestore || generation !== authGeneration.current) {
       if (generation === authGeneration.current) {
         setUser(null);
         setIsOffline(false);
@@ -100,51 +135,69 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const offline = await isDeviceOffline();
     if (offline) {
-      if (generation === authGeneration.current) {
-        setIsOffline(true);
-        await restoreOfflineUser(generation);
-      }
+      await hydrateOfflineUser(generation);
       return;
     }
 
-    if (generation === authGeneration.current) setIsOffline(false);
+    const token = await ensureFreshAccessToken();
+    if (!token) {
+      await forceLogout(generation);
+      return;
+    }
 
     try {
-      const res = await apiGet<BackendUser>('/account/me', undefined, {
-        timeoutMs: AUTH_BOOTSTRAP_TIMEOUT_MS,
-        noRefresh: true,
-      });
-
-      if (generation !== authGeneration.current) return;
-
-      const nextUser = mapBackendUser(res.data);
-      await persistUser(nextUser);
-      setUser(nextUser);
-      setIsOffline(false);
+      await fetchAndPersistUser(generation);
     } catch (err) {
       if (generation !== authGeneration.current) return;
 
-      const apiErr = err as ApiError | null;
-      const status = apiErr?.status;
-      const code = apiErr?.code?.toUpperCase() ?? '';
-
-      if (status === 401 && code === 'SESSION_EXPIRED') {
-        await clearTokens();
-        setUser(null);
-        setIsOffline(false);
+      if (isAuthError(err)) {
+        await forceLogout(generation);
         return;
       }
 
-      if (status === 401 || isNetworkError(err)) {
-        setIsOffline(true);
-        await restoreOfflineUser(generation);
+      if (isNetworkError(err)) {
+        await hydrateOfflineUser(generation);
         return;
       }
 
-      setUser(null);
-      setIsOffline(false);
+      await hydrateOfflineUser(generation);
     }
-  }, []);
+  }, [fetchAndPersistUser, forceLogout, hydrateOfflineUser]);
+
+  const validateWhenOnline = useCallback(async (generation: number) => {
+    if (generation !== authGeneration.current) return;
+
+    const offline = await isDeviceOffline();
+    if (offline) {
+      setIsOffline(true);
+      return;
+    }
+
+    const token = await ensureFreshAccessToken();
+    if (!token) {
+      await forceLogout(generation);
+      return;
+    }
+
+    try {
+      await fetchAndPersistUser(generation);
+      scheduleSmartSyncOnReconnect();
+    } catch (err) {
+      if (generation !== authGeneration.current) return;
+
+      if (isAuthError(err)) {
+        await forceLogout(generation);
+        return;
+      }
+
+      if (isNetworkError(err)) {
+        setIsOffline(true);
+        return;
+      }
+
+      setIsOffline(true);
+    }
+  }, [fetchAndPersistUser, forceLogout]);
 
   useEffect(() => {
     let cancelled = false;
@@ -168,22 +221,41 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     return subscribeAuthFailure(() => {
       authGeneration.current += 1;
-      clearDataCache();
-      clearMutationQueue();
-      setUser(null);
-      setIsLoading(false);
+      const generation = authGeneration.current;
+      void forceLogout(generation).finally(() => {
+        if (generation === authGeneration.current) {
+          setIsLoading(false);
+        }
+      });
     });
-  }, []);
+  }, [forceLogout]);
 
   useEffect(() => {
     const onAppState = (state: AppStateStatus) => {
       if (state !== 'active') return;
-      void ensureFreshAccessToken();
+      const generation = authGeneration.current;
+      void validateWhenOnline(generation);
     };
 
     const sub = AppState.addEventListener('change', onAppState);
     return () => sub.remove();
-  }, []);
+  }, [validateWhenOnline]);
+
+  useEffect(() => {
+    const sub = NetInfo.addEventListener((state) => {
+      const online = state.isConnected === true && state.isInternetReachable !== false;
+      if (!online) {
+        setIsOffline(true);
+        return;
+      }
+
+      const generation = authGeneration.current;
+      if (!user) return;
+      void validateWhenOnline(generation);
+    });
+
+    return () => sub();
+  }, [user, validateWhenOnline]);
 
   const login = useCallback(async (email: string, password: string, remember = true) => {
     const result = await authLogin({ email, password, isRememberMe: remember });
@@ -239,6 +311,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     authGeneration.current += 1;
     clearDataCache();
     clearMutationQueue();
+    await unregisterPushOnLogout().catch(() => undefined);
     await authLogout();
     setUser(null);
     setIsOffline(false);

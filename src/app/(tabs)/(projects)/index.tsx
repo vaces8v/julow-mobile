@@ -1,12 +1,17 @@
+import { AccentCardSurface } from '@/components/card-surface';
 import { HeaderBlurBackground } from '@/components/header-blur-background';
 import { Fade } from '@/components/ui/fade';
 import { SigmaRadius, SigmaTypo } from '@/constants/sigma';
 import { useWorkspace } from '@/contexts/workspace-context';
+import { useCollapsibleHeaderScroll } from '@/hooks/use-collapsible-header-scroll';
+import { useCollapsibleHeaderStyles } from '@/hooks/use-collapsible-header-styles';
+import { useCollapsibleRefreshControl } from '@/hooks/use-collapsible-refresh-control';
 import { useSemanticTheme, type SemanticTheme } from '@/hooks/use-semantic-theme';
 import { useI18n } from '@/i18n/context';
 import type { Locale, Translations } from '@/i18n/translations';
-import { api, type ProjectPayload } from '@/lib/api';
+import { api, normalizeProjectStatus, type ProjectPayload } from '@/lib/api';
 import { cachedApi } from '@/lib/cache/cached-api';
+import { getLightRaisedCardStyle, getModalBorderStops, getAccentSheenStops } from '@/lib/theme-surfaces';
 import { useCacheSync } from '@/lib/cache/use-cache-sync';
 import {
   Add01Icon,
@@ -24,8 +29,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import {
   Modal,
   Pressable,
-  RefreshControl,
-  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
@@ -33,14 +36,11 @@ import {
   View,
 } from 'react-native';
 import Animated, {
-  interpolate,
-  useAnimatedScrollHandler,
   useAnimatedStyle,
   useSharedValue,
   withTiming,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useColorScheme } from 'react-native';
 
 const FALLBACK_COLORS = [
   '#3b82f6', '#8b5cf6', '#06b6d4', '#f97316', '#22c55e',
@@ -52,10 +52,10 @@ function projectColor(project: ProjectPayload, idx: number) {
 }
 
 function statusMeta(status: string | undefined, c: SemanticTheme, p: Translations['projectsPage']) {
-  const key = (status ?? 'active').toLowerCase();
-  if (key === 'paused') return { label: p.statusPaused, bg: c.warning + '18', fg: c.warning };
+  const key = normalizeProjectStatus(status);
   if (key === 'archived') return { label: p.statusArchived, bg: c.muted + '22', fg: c.muted };
-  if (key === 'completed') return { label: p.statusCompleted, bg: c.accent + '18', fg: c.accent };
+  if (key === 'suspended') return { label: p.statusSuspended, bg: c.warning + '18', fg: c.warning };
+  if (key === 'pending_deletion') return { label: p.statusPendingDeletion, bg: c.danger + '18', fg: c.danger };
   return { label: p.statusActive, bg: c.success + '18', fg: c.success };
 }
 
@@ -88,7 +88,6 @@ export default function ProjectsScreen() {
   const c = useSemanticTheme();
   const { t, locale } = useI18n();
   const insets = useSafeAreaInsets();
-  const scheme = useColorScheme();
   const blurTargetRef = useRef<View>(null);
   const { activeWorkspaceId, refreshProjects } = useWorkspace();
 
@@ -147,9 +146,14 @@ export default function ProjectsScreen() {
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await loadData(true);
-    setRefreshing(false);
-  }, [loadData]);
+    try {
+      await Promise.all([loadData(true), refreshProjects(true)]);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [loadData, refreshProjects]);
+
+  const refreshControl = useCollapsibleRefreshControl({ refreshing, onRefresh, c });
 
   const handleCreate = async () => {
     if (!activeWorkspaceId || !newName.trim()) return;
@@ -168,7 +172,7 @@ export default function ProjectsScreen() {
       syncFromCache();
     } catch (e) {
       console.error('Failed to create project:', e);
-      setCreateError(e instanceof Error ? e.message : 'Failed to create project');
+      setCreateError(e instanceof Error ? e.message : t.projectsPage.createFailed);
     } finally {
       setCreating(false);
     }
@@ -178,7 +182,7 @@ export default function ProjectsScreen() {
   const totalDone = useMemo(() => Object.values(taskCounts).reduce((s, n) => s + n.done, 0), [taskCounts]);
   const completionPct = totalTasks > 0 ? Math.round((totalDone / totalTasks) * 100) : 0;
   const activeCount = useMemo(
-    () => allProjects.filter((p) => (p.status ?? 'active').toLowerCase() === 'active').length,
+    () => allProjects.filter((p) => normalizeProjectStatus(p.status) === 'active').length,
     [allProjects],
   );
 
@@ -197,31 +201,18 @@ export default function ProjectsScreen() {
     }),
   );
 
-  const scrollY = useSharedValue(0);
-  const scrollHandler = useAnimatedScrollHandler({ onScroll: (e) => { scrollY.value = e.contentOffset.y; } });
+  const { scrollRef, headerProgress, scrollHandler } = useCollapsibleHeaderScroll('projects');
   const HEADER_H = insets.top + 54;
-
-  const headerBgStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [10, 50], [0, 1], 'clamp'),
-  }));
-  const largeTitleStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [0, 40], [1, 0], 'clamp'),
-    transform: [
-      { scale: interpolate(scrollY.value, [-50, 0, 40], [1.04, 1, 0.94], 'clamp') },
-      { translateY: interpolate(scrollY.value, [0, 40], [0, -10], 'clamp') },
-    ],
-  }));
-  const smallTitleStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [30, 60], [0, 1], 'clamp'),
-    transform: [{ translateY: interpolate(scrollY.value, [30, 60], [10, 0], 'clamp') }],
-  }));
-  const headerAddStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [30, 60], [0, 1], 'clamp'),
-  }));
+  const {
+    headerBgStyle,
+    smallTitleStyle,
+    largeTitleStyle,
+    headerActionStyle: headerAddStyle,
+  } = useCollapsibleHeaderStyles(headerProgress);
 
   return (
     <View style={{ flex: 1, backgroundColor: c.background }}>
-      <StatusBar barStyle={scheme === 'dark' ? 'light-content' : 'dark-content'} />
+      <StatusBar barStyle={c.scheme === 'dark' ? 'light-content' : 'dark-content'} />
 
       <View style={[styles.fixedHeader, { height: HEADER_H, paddingTop: insets.top }]} pointerEvents="box-none">
         <Animated.View style={[StyleSheet.absoluteFill, headerBgStyle]} pointerEvents="none">
@@ -245,6 +236,7 @@ export default function ProjectsScreen() {
 
       <BlurTargetView ref={blurTargetRef} style={{ flex: 1 }} collapsable={false}>
         <Animated.ScrollView
+          ref={scrollRef}
           onScroll={scrollHandler}
           scrollEventThrottle={16}
           showsVerticalScrollIndicator={false}
@@ -253,15 +245,7 @@ export default function ProjectsScreen() {
             paddingBottom: insets.bottom + 100,
             paddingHorizontal: 20,
           }}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={c.foreground}
-              colors={[c.accent]}
-              progressBackgroundColor={c.surfaceSecondary}
-            />
-          }
+          refreshControl={refreshControl}
         >
           <Animated.View style={[styles.largeTitleWrap, largeTitleStyle]}>
             <View style={{ flex: 1, paddingRight: 12 }}>
@@ -275,39 +259,31 @@ export default function ProjectsScreen() {
             </Pressable>
           </Animated.View>
 
-          <View style={styles.metricsBleed}>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              decelerationRate="fast"
-              nestedScrollEnabled
-              contentContainerStyle={styles.metricsScrollContent}
-            >
-              <MetricChip
-                c={c}
-                icon={Folder02Icon}
-                title={projectLabel}
-                subtitle={formatTemplate(t.projectsPage.activeCount, { n: activeCount })}
-                value={String(allProjects.length)}
-                color={c.accent}
-              />
-              <MetricChip
-                c={c}
-                icon={CheckmarkCircle02Icon}
-                title={taskLabel}
-                subtitle={formatTemplate(t.projectsPage.completedOf, { done: totalDone, total: totalTasks })}
-                value={String(totalDone)}
-                color={c.success}
-              />
-              <MetricChip
-                c={c}
-                icon={Task01Icon}
-                title={t.dashboard.done}
-                subtitle={t.projectsPage.overall}
-                value={`${completionPct}%`}
-                color={c.warning}
-              />
-            </ScrollView>
+          <View style={styles.metricsRow}>
+            <MetricChip
+              c={c}
+              icon={Folder02Icon}
+              title={projectLabel}
+              subtitle={formatTemplate(t.projectsPage.activeCount, { n: activeCount })}
+              value={String(allProjects.length)}
+              color={c.accent}
+            />
+            <MetricChip
+              c={c}
+              icon={CheckmarkCircle02Icon}
+              title={taskLabel}
+              subtitle={formatTemplate(t.projectsPage.completedOf, { done: totalDone, total: totalTasks })}
+              value={String(totalDone)}
+              color={c.success}
+            />
+            <MetricChip
+              c={c}
+              icon={Task01Icon}
+              title={t.dashboard.done}
+              subtitle={t.projectsPage.overall}
+              value={`${completionPct}%`}
+              color={c.warning}
+            />
           </View>
 
           <View style={styles.sectionHead}>
@@ -332,7 +308,14 @@ export default function ProjectsScreen() {
                 onPress={() => setCreateOpen(true)}
                 style={({ pressed }) => [{ opacity: pressed ? 0.92 : 1 }]}
               >
-                <View style={[styles.addCard, { borderColor: c.border, backgroundColor: c.surface }]}>
+                <View
+                  style={[
+                    styles.addCard,
+                    c.scheme === 'light'
+                      ? { ...getLightRaisedCardStyle(c), borderStyle: 'dashed', borderWidth: 1.5 }
+                      : { borderColor: c.border, backgroundColor: c.surface, borderWidth: 1.5, borderStyle: 'dashed' },
+                  ]}
+                >
                   <View style={[styles.addCardIcon, { backgroundColor: c.surfaceSecondary }]}>
                     <HugeiconsIcon icon={Add01Icon} size={22} color={c.accent} strokeWidth={2} />
                   </View>
@@ -347,33 +330,28 @@ export default function ProjectsScreen() {
 
       <Modal visible={createOpen} animationType="fade" transparent onRequestClose={() => setCreateOpen(false)}>
         <View style={styles.modalOverlay}>
-          <LinearGradient
-            colors={c.scheme === 'dark'
-              ? ['rgba(255,255,255,0.2)', 'rgba(255,255,255,0.06)', 'rgba(255,255,255,0.1)']
-              : ['rgba(255,255,255,0.95)', 'rgba(0,0,0,0.05)', 'rgba(255,255,255,0.7)']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.modalBorder}
-          >
+          {(() => {
+            const modalBorder = getModalBorderStops(c.scheme);
+            const modalBody = (
             <View style={[styles.modalCard, { backgroundColor: c.surface }]}>
               <Text style={[styles.modalTitle, { color: c.foreground }]}>{t.common.create}</Text>
               <Text style={[styles.modalHint, { color: c.muted }]}>{t.nav.project}</Text>
 
-              <Text style={[styles.modalLabel, { color: c.foreground }]}>Name</Text>
+              <Text style={[styles.modalLabel, { color: c.foreground }]}>{t.projectsPage.createNameLabel}</Text>
               <TextInput
                 value={newName}
                 onChangeText={setNewName}
-                placeholder="Project name"
+                placeholder={t.projectsPage.createNamePlaceholder}
                 placeholderTextColor={c.muted}
                 style={[styles.modalInput, { color: c.foreground, backgroundColor: c.surfaceSecondary, borderColor: c.border }]}
                 autoFocus
               />
 
-              <Text style={[styles.modalLabel, { color: c.foreground, marginTop: 12 }]}>Description</Text>
+              <Text style={[styles.modalLabel, { color: c.foreground, marginTop: 12 }]}>{t.projectsPage.createDescLabel}</Text>
               <TextInput
                 value={newDesc}
                 onChangeText={setNewDesc}
-                placeholder="Optional description"
+                placeholder={t.projectsPage.createDescPlaceholder}
                 placeholderTextColor={c.muted}
                 style={[styles.modalInput, styles.modalTextarea, { color: c.foreground, backgroundColor: c.surfaceSecondary, borderColor: c.border }]}
                 multiline
@@ -395,11 +373,25 @@ export default function ProjectsScreen() {
                   onPress={() => void handleCreate()}
                   disabled={!newName.trim() || creating}
                 >
-                  <Text style={[styles.modalBtnText, { color: c.accentForeground }]}>{creating ? '…' : t.common.create}</Text>
+                  <Text style={[styles.modalBtnText, { color: c.accentForeground }]}>{creating ? t.common.loading : t.common.create}</Text>
                 </Pressable>
               </View>
             </View>
-          </LinearGradient>
+            );
+            if (modalBorder) {
+              return (
+                <LinearGradient
+                  colors={modalBorder}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.modalBorder}
+                >
+                  {modalBody}
+                </LinearGradient>
+              );
+            }
+            return <View style={[styles.modalBorderLight, getLightRaisedCardStyle(c)]}>{modalBody}</View>;
+          })()}
         </View>
       </Modal>
     </View>
@@ -421,35 +413,27 @@ function MetricChip({
   value: string;
   color: string;
 }) {
-  const borderColors =
-    c.scheme === 'dark'
-      ? [color + '50', 'rgba(255,255,255,0.08)', 'rgba(255,255,255,0.05)']
-      : [color + '60', 'rgba(255,255,255,0.95)', 'rgba(0,0,0,0.04)'];
-
   return (
-    <LinearGradient colors={borderColors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.metricBorder}>
-      <View style={[styles.metricChip, { backgroundColor: c.surface }]}>
-        <LinearGradient
-          colors={[color + '1A', color + '08', 'transparent']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={StyleSheet.absoluteFill}
-          pointerEvents="none"
-        />
-        <View style={[styles.metricIconCap, { backgroundColor: color + '20' }]}>
-          <HugeiconsIcon icon={icon} size={24} color={color} strokeWidth={1.6} />
-        </View>
-        <View style={styles.metricBody}>
-          <View style={styles.metricTextCol}>
-            <Text style={[styles.metricLabel, { color: c.foreground }]} numberOfLines={1}>{title}</Text>
-            {!!subtitle && (
-              <Text style={[styles.metricHint, { color: c.muted }]} numberOfLines={1}>{subtitle}</Text>
-            )}
-          </View>
-          <Text style={[styles.metricValueCol, { color: c.foreground }]}>{value}</Text>
-        </View>
+    <AccentCardSurface
+      c={c}
+      color={color}
+      style={styles.metricBorder}
+      innerStyle={styles.metricChip}
+      contentStyle={styles.metricContent}
+    >
+      <View style={[styles.metricIconCap, { backgroundColor: color + (c.scheme === 'dark' ? '20' : '14') }]}>
+        <HugeiconsIcon icon={icon} size={24} color={color} strokeWidth={1.6} />
       </View>
-    </LinearGradient>
+      <View style={styles.metricBody}>
+        <View style={styles.metricTextCol}>
+          <Text style={[styles.metricLabel, { color: c.foreground }]} numberOfLines={1}>{title}</Text>
+          {!!subtitle && (
+            <Text style={[styles.metricHint, { color: c.muted }]} numberOfLines={1}>{subtitle}</Text>
+          )}
+        </View>
+        <Text style={[styles.metricValueCol, { color: c.foreground }]}>{value}</Text>
+      </View>
+    </AccentCardSurface>
   );
 }
 
@@ -462,16 +446,11 @@ function ProjectCardSurface({
   color: string;
   children: ReactNode;
 }) {
-  const borderColors =
-    c.scheme === 'dark'
-      ? [color + '55', 'rgba(255,255,255,0.08)', 'rgba(255,255,255,0.06)']
-      : [color + '66', 'rgba(255,255,255,0.9)', 'rgba(0,0,0,0.04)'];
-
-  return (
-    <LinearGradient colors={borderColors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.projectBorder}>
-      <View style={[styles.projectInner, { backgroundColor: c.surface }]}>
+  if (c.scheme === 'light') {
+    return (
+      <View style={[styles.projectLight, getLightRaisedCardStyle(c)]}>
         <LinearGradient
-          colors={[color + '20', color + '08', 'transparent']}
+          colors={getAccentSheenStops(c.scheme, color)}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
           style={StyleSheet.absoluteFill}
@@ -479,7 +458,13 @@ function ProjectCardSurface({
         />
         <View style={styles.projectContent}>{children}</View>
       </View>
-    </LinearGradient>
+    );
+  }
+
+  return (
+    <AccentCardSurface c={c} color={color} style={styles.projectBorder} innerStyle={styles.projectInner}>
+      <View style={styles.projectContent}>{children}</View>
+    </AccentCardSurface>
   );
 }
 
@@ -566,7 +551,7 @@ function ProjectCard({
                         { backgroundColor: avatarColor, marginLeft: i > 0 ? -7 : 0, borderColor: c.surface },
                       ]}
                     >
-                      <Text style={styles.memberInitial}>{m.name?.[0] ?? '?'}</Text>
+                      <Text style={styles.memberInitial}>{m.name?.[0] ?? t.projectDetail.unknownMember}</Text>
                     </View>
                   );
                 })}
@@ -606,20 +591,18 @@ const styles = StyleSheet.create({
   largeSubtitle: { marginTop: 6, fontSize: SigmaTypo.bodySmall, fontWeight: '500', lineHeight: 20 },
   addBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', marginTop: 2 },
 
-  metricsBleed: {
-    marginHorizontal: -20,
-    marginBottom: 22,
-  },
-  metricsScrollContent: {
-    paddingLeft: 20,
-    paddingRight: 0,
-    gap: 12,
+  metricsRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginBottom: 22,
   },
   metricBorder: {
     borderRadius: 999,
     padding: 1,
     alignSelf: 'flex-start',
+    flexGrow: 0,
+    flexShrink: 0,
   },
   metricChip: {
     flexDirection: 'row',
@@ -630,6 +613,11 @@ const styles = StyleSheet.create({
     paddingLeft: 6,
     gap: 8,
     overflow: 'hidden',
+    flexGrow: 0,
+  },
+  metricContent: {
+    flexGrow: 0,
+    flexShrink: 0,
   },
   metricIconCap: {
     width: 50,
@@ -642,10 +630,8 @@ const styles = StyleSheet.create({
   metricBody: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     gap: 12,
-    flexShrink: 1,
-    flex: 1,
+    flexShrink: 0,
     paddingRight: 2,
   },
   metricValueCol: {
@@ -689,6 +675,10 @@ const styles = StyleSheet.create({
   projectBorder: {
     borderRadius: SigmaRadius.xl,
     padding: 1,
+  },
+  projectLight: {
+    borderRadius: SigmaRadius.xl,
+    overflow: 'hidden',
   },
   projectInner: {
     borderRadius: SigmaRadius.xl - 1,
@@ -767,8 +757,6 @@ const styles = StyleSheet.create({
   addCard: {
     minHeight: 132,
     borderRadius: SigmaRadius.xl,
-    borderWidth: 1.5,
-    borderStyle: 'dashed',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
@@ -797,6 +785,12 @@ const styles = StyleSheet.create({
     maxWidth: 400,
     borderRadius: SigmaRadius.xl,
     padding: 1,
+  },
+  modalBorderLight: {
+    width: '100%',
+    maxWidth: 400,
+    borderRadius: SigmaRadius.xl,
+    overflow: 'hidden',
   },
   modalCard: {
     borderRadius: SigmaRadius.xl - 1,

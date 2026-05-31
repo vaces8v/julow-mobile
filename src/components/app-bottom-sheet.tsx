@@ -1,8 +1,8 @@
 import { BottomSheetSnapOnMount } from '@/components/bottom-sheet-snap-on-mount';
-import { BottomSheet as HeroBottomSheet } from 'heroui-native';
+import { BottomSheet as HeroBottomSheet, useBottomSheet as useHeroBottomSheet } from 'heroui-native';
 import { useCallback, type ComponentProps, type ReactNode } from 'react';
 import { Dimensions, View, type LayoutChangeEvent } from 'react-native';
-import { useBottomSheet } from '@gorhom/bottom-sheet';
+import { useBottomSheet as useGorhomBottomSheet } from '@gorhom/bottom-sheet';
 
 const WINDOW_HEIGHT = Dimensions.get('window').height;
 
@@ -108,13 +108,15 @@ type SnapOnLayoutProps = {
 
 /** Resnap after content measures (release builds often need this for large media). */
 function BottomSheetSnapOnLayout({ index, children }: SnapOnLayoutProps) {
-  const { snapToIndex } = useBottomSheet();
+  const { isOpen } = useHeroBottomSheet();
+  const { snapToIndex } = useGorhomBottomSheet();
 
   const onLayout = useCallback(
     (_e: LayoutChangeEvent) => {
+      if (!isOpen) return;
       snapToIndex(index);
     },
-    [index, snapToIndex],
+    [index, isOpen, snapToIndex],
   );
 
   return (

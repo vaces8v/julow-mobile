@@ -266,9 +266,11 @@ export function TaskCreateSheet({
 
   const footerInset = Math.max(insets.bottom, Platform.OS === 'ios' ? 12 : 8);
 
+  if (!isOpen) return null;
+
   return (
     <BottomSheet
-      isOpen={isOpen}
+      isOpen
       onOpenChange={(v) => {
         onOpenChange(v);
         if (!v) reset();

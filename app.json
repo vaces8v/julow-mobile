@@ -4,19 +4,23 @@
     "slug": "julow-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/icon-light.png",
     "newArchEnabled": false,
     "scheme": "julowmobile",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "bundleIdentifier": "com.anonymous.julowmobile"
+      "bundleIdentifier": "com.anonymous.julowmobile",
+      "icon": {
+        "light": "./assets/images/icon-light.png",
+        "dark": "./assets/images/icon-dark.png"
+      }
     },
     "android": {
       "label": "Julow",
       "adaptiveIcon": {
-        "backgroundColor": "#0b1020",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png"
+        "backgroundColor": "#FFFFFF",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.anonymous.julowmobile",
@@ -81,6 +85,14 @@
         "expo-camera",
         {
           "cameraPermission": "Разрешите доступ к камере для сканирования QR-кода входа на сайте Julow."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/android-icon-monochrome.png",
+          "color": "#0280b6",
+          "defaultChannel": "default"
         }
       ]
     ],

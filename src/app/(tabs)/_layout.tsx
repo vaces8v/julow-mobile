@@ -1,6 +1,5 @@
-import { ThemedText } from '@/components/themed-text';
 import { BlurContext } from '@/contexts/blur-context';
-import { useSemanticTheme } from '@/hooks/use-semantic-theme';
+import { THEME_FALLBACK, useSemanticTheme, type SemanticTheme } from '@/hooks/use-semantic-theme';
 import { useI18n } from '@/i18n/context';
 import {
   BubbleChatIcon,
@@ -13,8 +12,9 @@ import { HugeiconsIcon } from '@hugeicons/react-native';
 import { BlurTargetView, BlurView } from 'expo-blur';
 import { Href, Tabs, useRouter, useSegments } from 'expo-router';
 import { NativeTabs } from 'expo-router/unstable-native-tabs';
+import { getTabBarChromeStyle } from '@/lib/theme-surfaces';
 import { useMemo, useRef } from 'react';
-import { DeviceEventEmitter, Platform, Pressable, StyleSheet, useColorScheme, View } from 'react-native';
+import { DeviceEventEmitter, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const IS_IOS_26 = Platform.OS === 'ios' && parseInt(String(Platform.Version), 10) >= 26;
@@ -30,6 +30,15 @@ const TAB_ICONS = [
   { name: 'search', key: 'search' as const, icon: Search01Icon },
   { name: 'settings', key: 'settings' as const, icon: Settings02Icon },
 ];
+
+function tabItemColor(theme: SemanticTheme, focused: boolean): string {
+  const fallback = THEME_FALLBACK[theme.scheme];
+  const color = focused ? theme.foreground : theme.muted;
+  if (!color || color === theme.surface || color === 'transparent') {
+    return focused ? fallback.foreground : fallback.muted;
+  }
+  return color;
+}
 
 function TabButton({
   children,
@@ -94,9 +103,8 @@ function NativeTabLayout() {
 function BlurTabLayout() {
   const segments = useSegments();
   const router = useRouter();
-  const scheme = useColorScheme();
-  const isDark = scheme === 'dark';
   const theme = useSemanticTheme();
+  const isDark = theme.scheme === 'dark';
   const { t: i18n } = useI18n();
   const tabs = useMemo(
     () =>
@@ -122,10 +130,14 @@ function BlurTabLayout() {
   };
 
   const tabBarContent = (
-    <View style={[styles.tabBar, { paddingBottom: insets.bottom > 0 ? insets.bottom : 10 }]}>
+    <View
+      style={[
+        styles.tabBar,
+        { paddingBottom: insets.bottom > 0 ? insets.bottom : 10 },
+      ]}>
       {tabs.map((tab) => {
         const focused = isTabFocused(tab.name);
-        const color = focused ? theme.foreground : theme.muted;
+        const color = tabItemColor(theme, focused);
 
         return (
           <TabButton
@@ -146,9 +158,11 @@ function BlurTabLayout() {
               color={color}
               strokeWidth={focused ? 2 : 1.5}
             />
-            <ThemedText style={[styles.tabLabel, { color, fontWeight: focused ? '600' : '400' }]}>
+            <Text
+              numberOfLines={1}
+              style={[styles.tabLabel, { color, fontWeight: focused ? '600' : '400' }]}>
               {tab.label}
-            </ThemedText>
+            </Text>
           </TabButton>
         );
       })}
@@ -158,9 +172,9 @@ function BlurTabLayout() {
   const tabsContent = (
     <Tabs
       initialRouteName="(home)"
+      tabBar={() => null}
       screenOptions={{
         headerShown: false,
-        tabBarStyle: { display: 'none' },
       }}>
       <Tabs.Screen name="(home)" />
       <Tabs.Screen name="(projects)" />
@@ -185,23 +199,30 @@ function BlurTabLayout() {
           <View
             style={[
               styles.blurContainer,
-              { height: tabBarHeight, backgroundColor: theme.surface },
+              { height: tabBarHeight },
+              getTabBarChromeStyle(theme),
             ]}>
             {tabBarContent}
           </View>
         ) : (
-          <BlurView
-            blurTarget={blurTargetRef}
-            intensity={isDark ? 20 : 30}
-            tint={isDark ? 'dark' : 'prominent'}
-            blurReductionFactor={0.5}
-            style={[
-              styles.blurContainer,
-              isDark && styles.blurContainerDark,
-              { height: tabBarHeight },
-            ]}>
+          <View style={[styles.blurContainer, { height: tabBarHeight }, getTabBarChromeStyle(theme)]}>
+            <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+              <BlurView
+                blurTarget={blurTargetRef}
+                intensity={isDark ? 20 : 36}
+                tint={isDark ? 'dark' : 'light'}
+                blurReductionFactor={0.5}
+                style={StyleSheet.absoluteFill}
+              />
+              <View
+                style={[
+                  StyleSheet.absoluteFill,
+                  { backgroundColor: theme.surface, opacity: isDark ? 0.78 : 0.9 },
+                ]}
+              />
+            </View>
             {tabBarContent}
-          </BlurView>
+          </View>
         )}
       </View>
     </BlurContext.Provider>
@@ -228,9 +249,13 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 0,
     overflow: 'hidden',
   },
-  blurContainerDark: {},
   tabBar: {
-    flex: 1,
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 1,
     flexDirection: 'row',
     justifyContent: 'space-around',
     alignItems: 'center',

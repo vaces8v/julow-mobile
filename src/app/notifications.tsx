@@ -7,6 +7,7 @@ import { useSemanticTheme } from '@/hooks/use-semantic-theme';
 import { useI18n } from '@/i18n/context';
 import { api, type NotificationPayload } from '@/lib/api';
 import { cachedApi } from '@/lib/cache/cached-api';
+import { getLightCardElevation, getScreenTopGlowStops } from '@/lib/theme-surfaces';
 import { useCacheSync } from '@/lib/cache/use-cache-sync';
 import {
   ArrowLeft01Icon,
@@ -241,6 +242,7 @@ export default function NotificationsScreen() {
               backgroundColor: c.surface,
               borderColor: c.border,
               borderCurve: 'continuous',
+              ...(c.scheme === 'light' && isFirst ? getLightCardElevation() : null),
             },
           ]}
         >
@@ -302,7 +304,7 @@ export default function NotificationsScreen() {
       <StatusBar barStyle={c.scheme === 'dark' ? 'light-content' : 'dark-content'} />
 
       <LinearGradient
-        colors={[c.accent + '12', 'transparent']}
+        colors={getScreenTopGlowStops(c.scheme, c.accent)}
         style={styles.topGlow}
         pointerEvents="none"
       />

@@ -5,6 +5,7 @@ import { useSemanticTheme } from '@/hooks/use-semantic-theme';
 import type { SemanticTheme } from '@/hooks/use-semantic-theme';
 import { useI18n } from '@/i18n/context';
 import { api, type ProjectPayload, type TaskPayload } from '@/lib/api';
+import { getScreenTopGlowStops } from '@/lib/theme-surfaces';
 import {
   Cancel01Icon,
   CheckmarkCircle02Icon,
@@ -173,7 +174,7 @@ export default function SearchScreen() {
       <StatusBar barStyle={c.scheme === 'dark' ? 'light-content' : 'dark-content'} />
 
       <LinearGradient
-        colors={[c.accent + '12', 'transparent']}
+        colors={getScreenTopGlowStops(c.scheme, c.accent)}
         style={styles.topGlow}
         pointerEvents="none"
       />
