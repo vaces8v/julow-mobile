@@ -6,6 +6,11 @@ import { InteractionManager } from 'react-native';
 type BottomSheetSnapOnMountProps = {
   /** Snap index to open at; defaults to first snap point / dynamic content. */
   index?: number;
+  /**
+   * `fast` — immediate snap only (task sheets, dialogs).
+   * `default` — extra retries for heavy media sheets.
+   */
+  mode?: 'fast' | 'default';
 };
 
 /**
@@ -20,9 +25,9 @@ type BottomSheetSnapOnMountProps = {
  * Retries: immediate, double rAF, after interactions, 150ms, 300ms, and onLayout
  * (via AppBottomSheetContent snapOnLayout).
  */
-export function BottomSheetSnapOnMount({ index = 0 }: BottomSheetSnapOnMountProps) {
+export function BottomSheetSnapOnMount({ index = 0, mode = 'default' }: BottomSheetSnapOnMountProps) {
   const { isOpen } = useHeroBottomSheet();
-  const { snapToIndex, expand } = useGorhomBottomSheet();
+  const { snapToIndex } = useGorhomBottomSheet();
 
   useEffect(() => {
     if (!isOpen) return;
@@ -33,11 +38,7 @@ export function BottomSheetSnapOnMount({ index = 0 }: BottomSheetSnapOnMountProp
       try {
         snapToIndex(index);
       } catch {
-        try {
-          expand();
-        } catch {
-          /* sheet not ready */
-        }
+        /* sheet not ready — retry on next tick; never expand() (opens full screen) */
       }
     };
 
@@ -46,6 +47,14 @@ export function BottomSheetSnapOnMount({ index = 0 }: BottomSheetSnapOnMountProp
     const raf = requestAnimationFrame(() => {
       requestAnimationFrame(snap);
     });
+
+    if (mode === 'fast') {
+      return () => {
+        cancelled = true;
+        cancelAnimationFrame(raf);
+      };
+    }
+
     const afterInteractions = InteractionManager.runAfterInteractions(snap);
     const retry150 = setTimeout(snap, 150);
     const retry300 = setTimeout(snap, 300);
@@ -57,7 +66,7 @@ export function BottomSheetSnapOnMount({ index = 0 }: BottomSheetSnapOnMountProp
       clearTimeout(retry150);
       clearTimeout(retry300);
     };
-  }, [index, isOpen, snapToIndex, expand]);
+  }, [index, isOpen, mode, snapToIndex]);
 
   return null;
 }

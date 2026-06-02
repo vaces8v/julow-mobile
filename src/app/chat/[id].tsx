@@ -24,6 +24,7 @@ import { cachedApi } from '@/lib/cache/cached-api';
 import { useCacheSync } from '@/lib/cache/use-cache-sync';
 import { setActiveChatId } from '@/lib/active-chat';
 import { subscribeChat, subscribeWsEvent, unsubscribeChat } from '@/lib/ws-client';
+import { getScreenTopGlowStops } from '@/lib/theme-surfaces';
 import {
   ArrowLeft01Icon,
   UserMultiple02Icon,
@@ -111,6 +112,20 @@ function isSameDay(a?: string, b?: string): boolean {
   );
 }
 
+function mergeMessageList(
+  existing: MessagePayload[],
+  incoming: MessagePayload[],
+): MessagePayload[] {
+  const byId = new Map<string, MessagePayload>();
+  for (const msg of existing) byId.set(msg.id, msg);
+  for (const msg of incoming) byId.set(msg.id, msg);
+  return [...byId.values()].sort((a, b) => {
+    const ta = a.createdAt ? Date.parse(a.createdAt) : 0;
+    const tb = b.createdAt ? Date.parse(b.createdAt) : 0;
+    return ta - tb;
+  });
+}
+
 export default function ChatThreadScreen() {
   const c = useSemanticTheme();
   const insets = useSafeAreaInsets();
@@ -152,6 +167,7 @@ export default function ChatThreadScreen() {
   const [linkConfirmUrl, setLinkConfirmUrl] = useState<string | null>(null);
   const listRef = useRef<FlatList<MessagePayload>>(null);
   const messagesRef = useRef<MessagePayload[]>([]);
+  const sendingRef = useRef(false);
   const blurTargetRef = useRef<View>(null);
 
   useEffect(() => {
@@ -196,7 +212,9 @@ export default function ChatThreadScreen() {
     const cachedChat = cachedApi.getChatSync(chatId);
     const cachedMessages = cachedApi.getChatMessagesSync(chatId);
     if (cachedChat) setChat(cachedChat);
-    if (cachedMessages.length > 0) setMessages(cachedMessages);
+    if (cachedMessages.length > 0) {
+      setMessages((prev) => mergeMessageList(prev, cachedMessages));
+    }
   }, [chatId]);
 
   useCacheSync(syncFromCache);
@@ -222,18 +240,7 @@ export default function ChatThreadScreen() {
             : items.filter((m) => m.senderId !== user?.id);
           if (incoming.length === 0) return;
 
-          setMessages((prev) => {
-            const existing = new Set(prev.map((m) => m.id));
-            const newMsgs = incoming.filter((m) => !existing.has(m.id));
-            if (newMsgs.length === 0) return prev;
-            const merged = [...prev, ...newMsgs];
-            merged.sort((a, b) => {
-              const ta = a.createdAt ? Date.parse(a.createdAt) : 0;
-              const tb = b.createdAt ? Date.parse(b.createdAt) : 0;
-              return ta - tb;
-            });
-            return merged;
-          });
+          setMessages((prev) => mergeMessageList(prev, newMsgs));
           requestAnimationFrame(() => {
             listRef.current?.scrollToEnd({ animated: true });
           });
@@ -253,8 +260,9 @@ export default function ChatThreadScreen() {
   const handleSend = useCallback(async () => {
     const text = draft.trim();
     const filesDraft = pendingFiles;
-    if (!canSendComposer(draft) || !chatId || sending) return;
+    if (!canSendComposer(draft) || !chatId || sending || sendingRef.current) return;
 
+    sendingRef.current = true;
     setSending(true);
     setUploadingName(null);
     const textDraft = draft;
@@ -281,7 +289,7 @@ export default function ChatThreadScreen() {
 
       setDraft('');
       clearPending();
-      setMessages((prev) => [...prev, enriched]);
+      setMessages((prev) => mergeMessageList(prev, [enriched]));
       requestAnimationFrame(() => {
         listRef.current?.scrollToEnd({ animated: true });
       });
@@ -289,6 +297,7 @@ export default function ChatThreadScreen() {
       console.error('Failed to send message:', e);
       setDraft(textDraft);
     } finally {
+      sendingRef.current = false;
       setSending(false);
       setUploadingName(null);
     }
@@ -349,11 +358,13 @@ export default function ChatThreadScreen() {
     <View style={[styles.fill, { backgroundColor: c.background }]}>
       <StatusBar barStyle={c.scheme === 'dark' ? 'light-content' : 'dark-content'} />
 
-      <LinearGradient
-        colors={[c.accent + '0A', 'transparent', c.background]}
-        style={styles.threadGlow}
-        pointerEvents="none"
-      />
+      {c.scheme === 'dark' ? (
+        <LinearGradient
+          colors={getScreenTopGlowStops(c.scheme, c.accent, c.background)}
+          style={styles.threadGlow}
+          pointerEvents="none"
+        />
+      ) : null}
 
       <BlurTargetView ref={blurTargetRef} style={styles.fill} collapsable={false}>
         <ChatList
@@ -477,7 +488,7 @@ function ChatList({
     <FlatList
       ref={listRef}
       data={messages}
-      keyExtractor={(m: MessagePayload) => m.id}
+      keyExtractor={(m: MessagePayload, index) => m.id || `msg-${index}`}
       keyboardDismissMode="interactive"
       keyboardShouldPersistTaps="handled"
       removeClippedSubviews

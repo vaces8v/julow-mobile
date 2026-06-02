@@ -128,7 +128,14 @@ export function ChatFloatingInput({
       >
         {!IOS_GLASS && (
           <>
-            <HeaderBlurBackground blurTargetRef={blurTargetRef} />
+            {tone.scheme === 'light' ? (
+              <View
+                style={[StyleSheet.absoluteFill, { backgroundColor: tone.background }]}
+                pointerEvents="none"
+              />
+            ) : (
+              <HeaderBlurBackground blurTargetRef={blurTargetRef} />
+            )}
             <View style={[styles.pillTopBorder, { backgroundColor: tone.border }]} />
           </>
         )}

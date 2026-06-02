@@ -17,16 +17,18 @@ type FadeProps = {
 };
 
 /**
- * Fade — mount animation: opacity 0→1, translateY initialY→0.
- * Матчит по духу web-вариант на motion/react.
+ * Mount animation: slide up (translateY). Opacity stays at 1 so content is never
+ * stuck invisible if Reanimated timing fails on iOS (nested ScrollView / tab switches).
  */
 export function Fade({ children, delay = 0, initialY = 8, duration = 380, style }: FadeProps) {
-  const op = useSharedValue(0);
   const ty = useSharedValue(initialY);
+  const op = useSharedValue(1);
 
   useEffect(() => {
-    op.value = withDelay(delay, withTiming(1, { duration }));
+    ty.value = initialY;
+    op.value = 1;
     ty.value = withDelay(delay, withSpring(0, { damping: 18, stiffness: 220, mass: 0.6 }));
+    op.value = withDelay(delay, withTiming(1, { duration: Math.min(duration, 120) }));
   }, [delay, duration, initialY, op, ty]);
 
   const animated = useAnimatedStyle(() => ({

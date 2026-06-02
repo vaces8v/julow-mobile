@@ -27,8 +27,11 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
+  DeviceEventEmitter,
+  Dimensions,
   Modal,
   Pressable,
+  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
@@ -46,6 +49,15 @@ const FALLBACK_COLORS = [
   '#3b82f6', '#8b5cf6', '#06b6d4', '#f97316', '#22c55e',
   '#ec4899', '#14b8a6', '#f59e0b', '#6366f1', '#ef4444',
 ];
+
+const METRIC_PILL_RADIUS = 999;
+/** Компактные pill-карточки — горизонтальный скролл */
+const METRIC_CARD_WIDTH = Math.min(
+  200,
+  Math.max(168, Math.round(Dimensions.get('window').width * 0.52)),
+);
+/** Фиксированная высота ряда метрик — иначе на iOS вложенный ScrollView съедает вертикальный контент */
+const METRICS_ROW_HEIGHT = 68;
 
 function projectColor(project: ProjectPayload, idx: number) {
   return project.color || FALLBACK_COLORS[idx % FALLBACK_COLORS.length];
@@ -201,7 +213,7 @@ export default function ProjectsScreen() {
     }),
   );
 
-  const { scrollRef, headerProgress, scrollHandler } = useCollapsibleHeaderScroll('projects');
+  const { scrollRef, headerProgress, scrollHandler, resetScroll } = useCollapsibleHeaderScroll('projects');
   const HEADER_H = insets.top + 54;
   const {
     headerBgStyle,
@@ -209,6 +221,13 @@ export default function ProjectsScreen() {
     largeTitleStyle,
     headerActionStyle: headerAddStyle,
   } = useCollapsibleHeaderStyles(headerProgress);
+
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener('tabPress', (tab) => {
+      if (tab === '(projects)') resetScroll();
+    });
+    return () => sub.remove();
+  }, [resetScroll]);
 
   return (
     <View style={{ flex: 1, backgroundColor: c.background }}>
@@ -240,9 +259,11 @@ export default function ProjectsScreen() {
           onScroll={scrollHandler}
           scrollEventThrottle={16}
           showsVerticalScrollIndicator={false}
+          nestedScrollEnabled
+          removeClippedSubviews={false}
           contentContainerStyle={{
             paddingTop: insets.top + 10,
-            paddingBottom: insets.bottom + 100,
+            paddingBottom: insets.bottom + 120,
             paddingHorizontal: 20,
           }}
           refreshControl={refreshControl}
@@ -259,71 +280,81 @@ export default function ProjectsScreen() {
             </Pressable>
           </Animated.View>
 
-          <View style={styles.metricsRow}>
-            <MetricChip
-              c={c}
-              icon={Folder02Icon}
-              title={projectLabel}
-              subtitle={formatTemplate(t.projectsPage.activeCount, { n: activeCount })}
-              value={String(allProjects.length)}
-              color={c.accent}
-            />
-            <MetricChip
-              c={c}
-              icon={CheckmarkCircle02Icon}
-              title={taskLabel}
-              subtitle={formatTemplate(t.projectsPage.completedOf, { done: totalDone, total: totalTasks })}
-              value={String(totalDone)}
-              color={c.success}
-            />
-            <MetricChip
-              c={c}
-              icon={Task01Icon}
-              title={t.dashboard.done}
-              subtitle={t.projectsPage.overall}
-              value={`${completionPct}%`}
-              color={c.warning}
-            />
+          <View style={styles.metricsScrollHost}>
+            <ScrollView
+              horizontal
+              nestedScrollEnabled
+              showsHorizontalScrollIndicator={false}
+              decelerationRate="fast"
+              snapToInterval={METRIC_CARD_WIDTH + 10}
+              snapToAlignment="start"
+              style={styles.metricsScroll}
+              contentContainerStyle={styles.metricsScrollContent}
+            >
+              <MetricChip
+                c={c}
+                icon={Folder02Icon}
+                title={projectLabel}
+                caption={`${allProjects.length} · ${formatTemplate(t.projectsPage.activeCount, { n: activeCount })}`}
+                color={c.accent}
+              />
+              <MetricChip
+                c={c}
+                icon={CheckmarkCircle02Icon}
+                title={taskLabel}
+                caption={formatTemplate(t.projectsPage.completedOf, { done: totalDone, total: totalTasks })}
+                color={c.success}
+              />
+              <MetricChip
+                c={c}
+                icon={Task01Icon}
+                title={t.dashboard.done}
+                caption={`${completionPct}% · ${t.projectsPage.overall}`}
+                color={c.warning}
+              />
+            </ScrollView>
           </View>
 
-          <View style={styles.sectionHead}>
-            <Text style={[styles.sectionEyebrow, { color: c.accent }]}>{t.projectsPage.workspaceEyebrow}</Text>
-            <Text style={[styles.sectionTitle, { color: c.foreground }]}>{t.common.projects}</Text>
-          </View>
+          <View style={styles.projectsSection}>
+            <View style={styles.sectionHead}>
+              <Text style={[styles.sectionEyebrow, { color: c.accent }]}>{t.projectsPage.workspaceEyebrow}</Text>
+              <Text style={[styles.sectionTitle, { color: c.foreground }]}>{t.common.projects}</Text>
+            </View>
 
-          <View style={styles.grid}>
-            {allProjects.map((p, i) => (
-              <Fade key={p.id} delay={i * 60} initialY={8}>
-                <ProjectCard
-                  project={p}
-                  idx={i}
-                  counts={taskCounts[p.id] ?? { total: 0, done: 0 }}
-                  onPress={() => router.push(`/project/${p.id}` as any)}
-                />
-              </Fade>
-            ))}
+            <View style={styles.grid}>
+              {allProjects.map((p, i) => (
+                <Fade key={p.id} delay={i * 60} initialY={8}>
+                  <ProjectCard
+                    project={p}
+                    idx={i}
+                    counts={taskCounts[p.id] ?? { total: 0, done: 0 }}
+                    onPress={() => router.push(`/project/${p.id}` as any)}
+                  />
+                </Fade>
+              ))}
 
-            <Fade delay={allProjects.length * 60} initialY={8}>
-              <Pressable
-                onPress={() => setCreateOpen(true)}
-                style={({ pressed }) => [{ opacity: pressed ? 0.92 : 1 }]}
-              >
-                <View
-                  style={[
-                    styles.addCard,
-                    c.scheme === 'light'
-                      ? { ...getLightRaisedCardStyle(c), borderStyle: 'dashed', borderWidth: 1.5 }
-                      : { borderColor: c.border, backgroundColor: c.surface, borderWidth: 1.5, borderStyle: 'dashed' },
-                  ]}
+              <Fade delay={allProjects.length * 60} initialY={8}>
+                <Pressable
+                  onPress={() => setCreateOpen(true)}
+                  style={({ pressed }) => [{ opacity: pressed ? 0.92 : 1 }]}
                 >
-                  <View style={[styles.addCardIcon, { backgroundColor: c.surfaceSecondary }]}>
-                    <HugeiconsIcon icon={Add01Icon} size={22} color={c.accent} strokeWidth={2} />
+                  <View
+                    style={[
+                      styles.addCard,
+                      c.scheme === 'light'
+                        ? { ...getLightRaisedCardStyle(c), borderStyle: 'dashed', borderWidth: 1.5 }
+                        : { borderColor: c.border, backgroundColor: c.surface, borderWidth: 1.5, borderStyle: 'dashed' },
+                    ]}
+                  >
+                    <View style={[styles.addCardIcon, { backgroundColor: c.surfaceSecondary }]}>
+                      <HugeiconsIcon icon={Add01Icon} size={22} color={c.accent} strokeWidth={2} />
+                    </View>
+                    <Text style={[styles.addCardTitle, { color: c.foreground }]}>{t.common.create}</Text>
+                    <Text style={[styles.addCardSub, { color: c.muted }]}>{t.nav.project}</Text>
                   </View>
-                  <Text style={[styles.addCardTitle, { color: c.foreground }]}>{t.common.create}</Text>
-                  <Text style={[styles.addCardSub, { color: c.muted }]}>{t.nav.project}</Text>
-                </View>
-              </Pressable>
-            </Fade>
+                </Pressable>
+              </Fade>
+            </View>
           </View>
         </Animated.ScrollView>
       </BlurTargetView>
@@ -402,36 +433,34 @@ function MetricChip({
   c,
   icon,
   title,
-  subtitle,
-  value,
+  caption,
   color,
 }: {
   c: SemanticTheme;
   icon: typeof Folder02Icon;
   title: string;
-  subtitle?: string;
-  value: string;
+  caption: string;
   color: string;
 }) {
   return (
     <AccentCardSurface
       c={c}
       color={color}
+      radius={METRIC_PILL_RADIUS}
       style={styles.metricBorder}
       innerStyle={styles.metricChip}
       contentStyle={styles.metricContent}
     >
       <View style={[styles.metricIconCap, { backgroundColor: color + (c.scheme === 'dark' ? '20' : '14') }]}>
-        <HugeiconsIcon icon={icon} size={24} color={color} strokeWidth={1.6} />
+        <HugeiconsIcon icon={icon} size={20} color={color} strokeWidth={1.6} />
       </View>
-      <View style={styles.metricBody}>
-        <View style={styles.metricTextCol}>
-          <Text style={[styles.metricLabel, { color: c.foreground }]} numberOfLines={1}>{title}</Text>
-          {!!subtitle && (
-            <Text style={[styles.metricHint, { color: c.muted }]} numberOfLines={1}>{subtitle}</Text>
-          )}
-        </View>
-        <Text style={[styles.metricValueCol, { color: c.foreground }]}>{value}</Text>
+      <View style={styles.metricTextCol}>
+        <Text style={[styles.metricLabel, { color: c.foreground }]} numberOfLines={1}>
+          {title}
+        </Text>
+        <Text style={[styles.metricCaption, { color: c.muted }]} numberOfLines={2}>
+          {caption}
+        </Text>
       </View>
     </AccentCardSurface>
   );
@@ -591,68 +620,70 @@ const styles = StyleSheet.create({
   largeSubtitle: { marginTop: 6, fontSize: SigmaTypo.bodySmall, fontWeight: '500', lineHeight: 20 },
   addBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', marginTop: 2 },
 
-  metricsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
+  metricsScrollHost: {
+    height: METRICS_ROW_HEIGHT,
+    marginHorizontal: -20,
     marginBottom: 22,
-  },
-  metricBorder: {
-    borderRadius: 999,
-    padding: 1,
-    alignSelf: 'flex-start',
     flexGrow: 0,
     flexShrink: 0,
+  },
+  metricsScroll: {
+    flexGrow: 0,
+    flexShrink: 0,
+    height: METRICS_ROW_HEIGHT,
+  },
+  metricsScrollContent: {
+    paddingHorizontal: 20,
+    gap: 10,
+    paddingRight: 28,
+    alignItems: 'center',
+  },
+  projectsSection: {
+    flexGrow: 0,
+    flexShrink: 0,
+  },
+  metricBorder: {
+    width: METRIC_CARD_WIDTH,
+    flexShrink: 0,
+    borderRadius: METRIC_PILL_RADIUS,
   },
   metricChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    borderRadius: 999,
-    height: 62,
-    paddingRight: 16,
-    paddingLeft: 6,
-    gap: 8,
-    overflow: 'hidden',
-    flexGrow: 0,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    minHeight: 64,
+    borderRadius: METRIC_PILL_RADIUS,
   },
   metricContent: {
-    flexGrow: 0,
-    flexShrink: 0,
-  },
-  metricIconCap: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-  },
-  metricBody: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    flexShrink: 0,
-    paddingRight: 2,
+    gap: 10,
+    flex: 1,
   },
-  metricValueCol: {
-    fontSize: 24,
-    fontWeight: '800',
-    letterSpacing: -0.6,
+  metricIconCap: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
     flexShrink: 0,
   },
   metricTextCol: {
+    flex: 1,
+    minWidth: 0,
     justifyContent: 'center',
-    gap: 2,
-    flexShrink: 1,
+    gap: 3,
   },
   metricLabel: {
-    fontSize: 13,
+    fontSize: SigmaTypo.bodySmall,
     fontWeight: '700',
     letterSpacing: -0.1,
   },
-  metricHint: {
-    fontSize: 11,
-    fontWeight: '500',
+  metricCaption: {
+    fontSize: SigmaTypo.caption,
+    fontWeight: '600',
+    lineHeight: 15,
   },
 
   sectionHead: {
@@ -670,7 +701,7 @@ const styles = StyleSheet.create({
     letterSpacing: -0.3,
   },
 
-  grid: { gap: 14 },
+  grid: { gap: 14, flexGrow: 0, flexShrink: 0 },
 
   projectBorder: {
     borderRadius: SigmaRadius.xl,

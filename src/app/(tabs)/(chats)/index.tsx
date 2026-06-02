@@ -24,7 +24,7 @@ import { router, useFocusEffect } from 'expo-router';
 import { Skeleton } from 'heroui-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  FlatList,
+  DeviceEventEmitter,
   Platform,
   StatusBar,
   StyleSheet,
@@ -157,9 +157,16 @@ export default function ChatsListScreen() {
 
   const refreshControl = useCollapsibleRefreshControl({ refreshing, onRefresh, c });
 
-  const { scrollRef, headerProgress, scrollHandler } = useCollapsibleHeaderScroll('chats');
+  const { scrollRef, headerProgress, scrollHandler, resetScroll } = useCollapsibleHeaderScroll('chats');
   const HEADER_H = insets.top + 54;
   const { headerBgStyle, smallTitleStyle, largeTitleStyle } = useCollapsibleHeaderStyles(headerProgress);
+
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener('tabPress', (tab) => {
+      if (tab === '(chats)') resetScroll();
+    });
+    return () => sub.remove();
+  }, [resetScroll]);
 
   const visibleChats = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -218,7 +225,7 @@ export default function ChatsListScreen() {
       <StatusBar barStyle={c.scheme === 'dark' ? 'light-content' : 'dark-content'} />
 
       <LinearGradient
-        colors={getScreenTopGlowStops(c.scheme, c.accent)}
+        colors={getScreenTopGlowStops(c.scheme, c.accent, c.background)}
         style={styles.topGlow}
         pointerEvents="none"
       />
@@ -349,16 +356,11 @@ export default function ChatsListScreen() {
                 },
               ]}
             >
-              <FlatList
-                data={visibleChats}
-                keyExtractor={(ch) => ch.id}
-                scrollEnabled={false}
-                removeClippedSubviews={Platform.OS === 'android'}
-                windowSize={9}
-                maxToRenderPerBatch={12}
-                initialNumToRender={14}
-                renderItem={renderChatRow}
-              />
+              {visibleChats.map((ch, index) => (
+                <View key={ch.id} collapsable={false}>
+                  {renderChatRow({ item: ch, index })}
+                </View>
+              ))}
             </View>
           ) : (
             <Fade delay={80} initialY={10}>

@@ -23,8 +23,9 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const SHEET_RADIUS = 24;
-const LOGIN_DEFAULT_HEIGHT_RATIO = 0.88;
-const REGISTER_DEFAULT_HEIGHT_RATIO = 0.92;
+/** iOS: ниже, чтобы sheet не перекрывал AuthBrandHeader (логотип сверху). */
+const LOGIN_DEFAULT_HEIGHT_RATIO = Platform.select({ ios: 0.84, default: 0.88 }) ?? 0.88;
+const REGISTER_DEFAULT_HEIGHT_RATIO = Platform.select({ ios: 0.88, default: 0.92 }) ?? 0.92;
 const EXPANDED_HEIGHT_RATIO = 0.96;
 
 export type SheetPhase = 'idle' | 'exiting' | 'entering';

@@ -12,7 +12,9 @@ export function sheetSnapPercent(ratio: number): `${number}%` {
 }
 
 export const SHEET_SNAP = {
-  /** ~88% — image preview, task detail, task create */
+  /** ~68% — task detail (partial sheet, not full screen) */
+  taskDetail: sheetSnapPercent(0.68),
+  /** ~88% — image preview */
   large: sheetSnapPercent(0.88),
   /** ~90% — video preview */
   video: sheetSnapPercent(0.9),
@@ -36,13 +38,15 @@ export type AppBottomSheetContentProps = Omit<HeroContentProps, 'snapPoints' | '
    * Preset snap heights. Use `dynamic` for content-driven height (HeroUI + gorhom dynamic sizing).
    * Pass `snapPoints` explicitly to override.
    */
-  size?: 'large' | 'video' | 'tall' | 'medium' | 'compact' | 'dynamic';
+  size?: 'taskDetail' | 'large' | 'video' | 'tall' | 'medium' | 'compact' | 'dynamic';
   snapPoints?: HeroContentProps['snapPoints'];
   enableDynamicSizing?: boolean;
   /** Snap index after open; default 0 */
   snapIndex?: number;
   /** Extra snap retries after content onLayout (heavy media previews) */
   snapOnLayout?: boolean;
+  /** `fast` skips 150/300ms snap retries — use for task/detail sheets */
+  snapMode?: 'fast' | 'default';
 };
 
 /**
@@ -56,6 +60,7 @@ export function AppBottomSheetContent({
   enableDynamicSizing: enableDynamicSizingProp,
   snapIndex = 0,
   snapOnLayout = false,
+  snapMode = 'default',
   index = snapIndex,
   backgroundClassName = 'rounded-t-[28px]',
   enablePanDownToClose = true,
@@ -68,9 +73,11 @@ export function AppBottomSheetContent({
     snapPointsProp ??
     (isDynamic
       ? undefined
-      : size === 'large'
-        ? [SHEET_SNAP.large]
-        : size === 'video'
+      : size === 'taskDetail'
+        ? [SHEET_SNAP.taskDetail, SHEET_SNAP.large]
+        : size === 'large'
+          ? [SHEET_SNAP.large]
+          : size === 'video'
           ? [SHEET_SNAP.video]
           : size === 'tall'
             ? [SHEET_SNAP.tall]
@@ -91,9 +98,11 @@ export function AppBottomSheetContent({
       enablePanDownToClose={enablePanDownToClose}
       {...rest}
     >
-      <BottomSheetSnapOnMount index={snapIndex} />
-      {snapOnLayout ? (
-        <BottomSheetSnapOnLayout index={snapIndex}>{children}</BottomSheetSnapOnLayout>
+      <BottomSheetSnapOnMount index={snapIndex} mode={isDynamic ? 'fast' : snapMode} />
+      {isDynamic || snapOnLayout ? (
+        <BottomSheetSnapOnLayout index={snapIndex} dynamic={isDynamic}>
+          {children}
+        </BottomSheetSnapOnLayout>
       ) : (
         children
       )}
@@ -103,24 +112,25 @@ export function AppBottomSheetContent({
 
 type SnapOnLayoutProps = {
   index: number;
+  dynamic?: boolean;
   children: ReactNode;
 };
 
 /** Resnap after content measures (release builds often need this for large media). */
-function BottomSheetSnapOnLayout({ index, children }: SnapOnLayoutProps) {
+function BottomSheetSnapOnLayout({ index, dynamic = false, children }: SnapOnLayoutProps) {
   const { isOpen } = useHeroBottomSheet();
   const { snapToIndex } = useGorhomBottomSheet();
 
   const onLayout = useCallback(
     (_e: LayoutChangeEvent) => {
-      if (!isOpen) return;
+      if (!isOpen || dynamic) return;
       snapToIndex(index);
     },
-    [index, isOpen, snapToIndex],
+    [dynamic, index, isOpen, snapToIndex],
   );
 
   return (
-    <View style={{ flex: 1 }} onLayout={onLayout}>
+    <View style={dynamic ? undefined : { flex: 1 }} onLayout={onLayout}>
       {children}
     </View>
   );

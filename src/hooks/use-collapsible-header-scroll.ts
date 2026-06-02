@@ -1,5 +1,5 @@
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useRef } from 'react';
+import { useCallback, useLayoutEffect, useRef } from 'react';
 import type Animated from 'react-native-reanimated';
 import {
   makeMutable,
@@ -77,6 +77,12 @@ function finishHeaderSnap(
   progress.value = withTiming(target, HEADER_SNAP_TIMING);
 }
 
+function syncHeaderProgressImmediate(ui: PersistedScrollUi, y: number) {
+  const target = y >= COLLAPSIBLE_HEADER_THRESHOLD ? 1 : 0;
+  ui.snapTarget.value = target;
+  ui.headerProgress.value = target;
+}
+
 /** Persisted scroll offset + snap-based collapsible header for animated headers. */
 export function useCollapsibleHeaderScroll(screenKey: string) {
   const scrollRef = useRef<Animated.ScrollView>(null);
@@ -96,14 +102,16 @@ export function useCollapsibleHeaderScroll(screenKey: string) {
     (y: number) => {
       ui.scrollY.value = y;
       js.offsetJs = y;
-      const target = y >= COLLAPSIBLE_HEADER_THRESHOLD ? 1 : 0;
-      ui.snapTarget.value = target;
-      ui.headerProgress.value = target;
+      syncHeaderProgressImmediate(ui, y);
       ui.restoring.value = 0;
       js.restoreTargetY = 0;
     },
     [ui, js],
   );
+
+  useLayoutEffect(() => {
+    syncHeaderProgressImmediate(ui, js.offsetJs);
+  }, [screenKey, ui, js]);
 
   useFocusEffect(
     useCallback(() => {
@@ -111,6 +119,7 @@ export function useCollapsibleHeaderScroll(screenKey: string) {
       ui.restoring.value = 1;
       js.restoreTargetY = y;
       ui.scrollY.value = y;
+      syncHeaderProgressImmediate(ui, y);
 
       if (y > 1) {
         requestAnimationFrame(() => {

@@ -174,7 +174,7 @@ export default function SearchScreen() {
       <StatusBar barStyle={c.scheme === 'dark' ? 'light-content' : 'dark-content'} />
 
       <LinearGradient
-        colors={getScreenTopGlowStops(c.scheme, c.accent)}
+        colors={getScreenTopGlowStops(c.scheme, c.accent, c.background)}
         style={styles.topGlow}
         pointerEvents="none"
       />

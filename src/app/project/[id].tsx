@@ -1,5 +1,5 @@
 import { Fade } from '@/components/ui/fade';
-import { AppBottomSheetContent, BottomSheet } from '@/components/app-bottom-sheet';
+import { AppBottomSheetContent, BottomSheet, sheetSnapPx } from '@/components/app-bottom-sheet';
 import { TaskCreateSheet } from '@/components/task/task-create-sheet';
 import { SigmaRadius, SigmaTypo } from '@/constants/sigma';
 import { useSemanticTheme } from '@/hooks/use-semantic-theme';
@@ -22,9 +22,9 @@ import {
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react-native';
 import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { Skeleton } from 'heroui-native';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Linking,
   Platform,
@@ -36,6 +36,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { TouchableOpacity } from 'react-native-gesture-handler';
 import Animated, {
   interpolate,
   useAnimatedStyle,
@@ -179,6 +180,23 @@ export default function ProjectDetailScreen() {
   const [createSheetOpen, setCreateSheetOpen] = useState(false);
   const [createColumnId, setCreateColumnId] = useState<string | null>(null);
   const [detailSheetOpen, setDetailSheetOpen] = useState(false);
+  const sheetOpenedAtRef = useRef(0);
+
+  useEffect(() => {
+    setSelectedId(null);
+    setDetailSheetOpen(false);
+    setCreateSheetOpen(false);
+    setCreateColumnId(null);
+  }, [id]);
+
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        setDetailSheetOpen(false);
+        setSelectedId(null);
+      };
+    }, []),
+  );
 
   const loadData = useCallback(async (force = false) => {
     if (!id) return;
@@ -268,6 +286,18 @@ export default function ProjectDetailScreen() {
     }
   }, [syncFromCache]);
 
+  const selectTask = useCallback((taskId: string) => {
+    if (taskId === selectedId && detailSheetOpen) {
+      setDetailSheetOpen(false);
+      setSelectedId(null);
+      return;
+    }
+    sheetOpenedAtRef.current = Date.now();
+    setSelectedId(taskId);
+    setDetailSheetOpen(true);
+    void api.getTask(taskId).catch(() => undefined);
+  }, [selectedId, detailSheetOpen]);
+
   // Build status map from workflow statuses
   const statusMap = useMemo(() => {
     const m = new Map<string, WorkflowStatusPayload>();
@@ -334,20 +364,12 @@ export default function ProjectDetailScreen() {
   useEffect(() => {
     if (!taskParam || tasks.length === 0) return;
     const match = tasks.find((taskItem) => taskItem.id === taskParam);
-    if (match) setSelectedId(match.id);
-  }, [taskParam, tasks]);
-
-  // Open detail sheet when task is selected
-  useEffect(() => {
-    if (!selectedId) return;
-    const timeoutId = setTimeout(() => {
+    if (match) {
+      setSelectedId(match.id);
       setDetailSheetOpen(true);
-    }, 0);
-
-    return () => {
-      clearTimeout(timeoutId);
-    };
-  }, [selectedId]);
+      void api.getTask(match.id).catch(() => undefined);
+    }
+  }, [taskParam, tasks]);
 
   if (loading) {
     return (
@@ -443,6 +465,7 @@ export default function ProjectDetailScreen() {
         <ScrollView
           horizontal
           scrollEnabled={!detailSheetOpen}
+          keyboardShouldPersistTaps="handled"
           showsHorizontalScrollIndicator
           style={{ flex: 1 }}
           contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: insets.bottom + 100, gap: 12, alignItems: 'flex-start' }}
@@ -453,7 +476,8 @@ export default function ProjectDetailScreen() {
               <BoardColumn
                 col={col}
                 selectedId={selectedId}
-                onSelectTask={tid => setSelectedId(tid === selectedId ? null : tid)}
+                detailSheetOpen={detailSheetOpen}
+                onSelectTask={selectTask}
                 projectColor={projColor}
                 statusMap={statusMap}
                 onAddTask={() => openCreateSheet(col.id)}
@@ -491,8 +515,8 @@ export default function ProjectDetailScreen() {
               <TaskListRow
                 task={task}
                 statusMap={statusMap}
-                selected={selectedId === task.id}
-                onPress={() => setSelectedId(task.id === selectedId ? null : task.id)}
+                selected={selectedId === task.id && detailSheetOpen}
+                onPress={() => selectTask(task.id)}
               />
             </Fade>
           ))}
@@ -506,27 +530,41 @@ export default function ProjectDetailScreen() {
         <GanttView tasks={tasks} statusMap={statusMap} />
       )}
 
-      {/* Task detail bottom sheet (Hero UI) */}
+      {/* Task detail — remount on open so HeroUI/gorhom get a clean false→true transition */}
       {detailSheetOpen && selectedTask ? (
-      <BottomSheet isOpen onOpenChange={(v) => { setDetailSheetOpen(v); if (!v) setSelectedId(null); }}>
-        <BottomSheet.Portal>
-          <BottomSheet.Overlay />
-          <AppBottomSheetContent
-            size="dynamic"
-            contentContainerClassName="p-0"
-            enableHandlePanningGesture
-            enableContentPanningGesture
-          >
+        <BottomSheet
+          isOpen
+          onOpenChange={(v) => {
+            if (v) return;
+            if (Date.now() - sheetOpenedAtRef.current < 500) return;
+            setDetailSheetOpen(false);
+            setSelectedId(null);
+          }}
+        >
+          <BottomSheet.Portal>
+            <BottomSheet.Overlay />
+            <AppBottomSheetContent
+              size="dynamic"
+              snapOnLayout
+              maxDynamicContentSize={sheetSnapPx(0.88)}
+              contentContainerClassName="p-0"
+              enableHandlePanningGesture
+              enableContentPanningGesture
+            >
               <TaskDetail
+                key={selectedTask.id}
                 task={selectedTask}
                 statuses={statuses}
                 statusMap={statusMap}
                 onStatusChange={handleStatusChange}
-                onRequestClose={() => { setDetailSheetOpen(false); setSelectedId(null); }}
+                onRequestClose={() => {
+                  setDetailSheetOpen(false);
+                  setSelectedId(null);
+                }}
               />
-          </AppBottomSheetContent>
-        </BottomSheet.Portal>
-      </BottomSheet>
+            </AppBottomSheetContent>
+          </BottomSheet.Portal>
+        </BottomSheet>
       ) : null}
 
       {project ? (
@@ -549,9 +587,10 @@ export default function ProjectDetailScreen() {
 
 // ─── Board Column ─────────────────────────────────────────────────────────────
 
-function BoardColumn({ col, selectedId, onSelectTask, projectColor, statusMap, onAddTask, scrollEnabled = true }: {
+function BoardColumn({ col, selectedId, detailSheetOpen, onSelectTask, projectColor, statusMap, onAddTask, scrollEnabled = true }: {
   col: { id: string; label: string; category: string; color: string; dot: string; tasks: TaskPayload[] };
   selectedId: string | null;
+  detailSheetOpen: boolean;
   onSelectTask: (id: string) => void;
   projectColor: string;
   statusMap: Map<string, WorkflowStatusPayload>;
@@ -572,7 +611,7 @@ function BoardColumn({ col, selectedId, onSelectTask, projectColor, statusMap, o
           <HugeiconsIcon icon={Add01Icon} size={13} color={c.muted} strokeWidth={2} />
         </Pressable>
       </View>
-      <ScrollView showsVerticalScrollIndicator={false} nestedScrollEnabled scrollEnabled={scrollEnabled} style={{ maxHeight: 480 }} contentContainerStyle={{ gap: 8, paddingBottom: 8 }}>
+      <ScrollView showsVerticalScrollIndicator={false} nestedScrollEnabled scrollEnabled={scrollEnabled} keyboardShouldPersistTaps="handled" style={{ maxHeight: 480 }} contentContainerStyle={{ gap: 8, paddingBottom: 8 }}>
         {col.tasks.length === 0 ? (
           <View style={[styles.emptyCol, { borderColor: c.border }]}>
             <Text style={[styles.emptyColText, { color: c.muted }]}>{t.projectDetail.noTasks}</Text>
@@ -582,7 +621,7 @@ function BoardColumn({ col, selectedId, onSelectTask, projectColor, statusMap, o
             <Fade key={task.id} delay={i * 40} initialY={4}>
               <TaskCard
                 task={task}
-                selected={selectedId === task.id}
+                selected={selectedId === task.id && detailSheetOpen}
                 onPress={() => onSelectTask(task.id)}
                 statusColor={col.color}
               />
@@ -602,23 +641,13 @@ function TaskCard({ task, selected, onPress, statusColor }: {
   const c = useSemanticTheme();
   const { t, locale } = useI18n();
   const prio = priorityMeta(task.priority, t);
-  const pressed = useSharedValue(0);
-  const anim = useAnimatedStyle(() => ({
-    transform: [{ scale: interpolate(pressed.value, [0, 1], [1, 0.96]) }],
-    opacity: interpolate(pressed.value, [0, 1], [1, 0.94]),
-  }));
 
   return (
-    <Pressable
-      onPressIn={() => { pressed.value = withTiming(1, { duration: 80 }); }}
-      onPressOut={() => { pressed.value = withTiming(0, { duration: 120 }); }}
-      onPress={onPress}
-    >
-      <Animated.View style={[
+    <TouchableOpacity activeOpacity={0.92} onPress={onPress}>
+      <View style={[
         styles.taskCard,
         { backgroundColor: c.background, borderColor: selected ? statusColor + '80' : c.border },
         selected && { backgroundColor: statusColor + '08' },
-        anim,
       ]}>
         {(task.labels?.length ?? 0) > 0 && (
           <View style={styles.labelRow}>
@@ -646,8 +675,8 @@ function TaskCard({ task, selected, onPress, statusColor }: {
             </View>
           )}
         </View>
-      </Animated.View>
-    </Pressable>
+      </View>
+    </TouchableOpacity>
   );
 }
 
@@ -663,10 +692,8 @@ function TaskListRow({ task, statusMap, selected, onPress }: {
   const statusLabel = resolveStatusLabel(ws, task.status, t);
   const pm = priorityMeta(task.priority, t);
   return (
-    <Pressable
-      onPress={onPress}
-      style={[styles.listRow, { borderBottomColor: c.border, backgroundColor: selected ? sm.color + '08' : 'transparent' }]}
-    >
+    <TouchableOpacity activeOpacity={0.7} onPress={onPress}>
+      <View style={[styles.listRow, { borderBottomColor: c.border, backgroundColor: selected ? sm.color + '08' : 'transparent' }]}>
       <View style={{ flex: 3, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
         <View style={[styles.prioDot, { backgroundColor: pm.color }]} />
         <Text style={[styles.listTaskTitle, { color: c.foreground }]} numberOfLines={1}>{task.title}</Text>
@@ -676,7 +703,8 @@ function TaskListRow({ task, statusMap, selected, onPress }: {
       </View>
       <Text style={[styles.listCell, { color: pm.color }]}>{pm.label}</Text>
       <Text style={[styles.listCell, { color: c.muted }]}>{task.dueDate ? formatAppDate(task.dueDate, locale, 'dayMonth') : t.projectDetail.noDue}</Text>
-    </Pressable>
+      </View>
+    </TouchableOpacity>
   );
 }
 
@@ -698,17 +726,28 @@ function TaskDetail({ task, statuses, statusMap, onStatusChange, onRequestClose 
   const pm = priorityMeta(task.priority, t);
 
   const [detail, setDetail] = useState<TaskDetailPayload | null>(null);
-  const [commentCount, setCommentCount] = useState<number>(0);
+  const [commentCount, setCommentCount] = useState(
+    () => cachedApi.getTaskCommentsSync(task.id).length,
+  );
   const [statusUpdating, setStatusUpdating] = useState<string | null>(null);
 
   const ctaInset = Math.max(insets.bottom, 10);
 
   useEffect(() => {
-    api.getTask(task.id).then(setDetail).catch(() => {});
-    api
-      .listComments('task', task.id)
-      .then(items => setCommentCount(items.length))
+    let cancelled = false;
+    void Promise.all([
+      api.getTask(task.id),
+      api.listComments('task', task.id),
+    ])
+      .then(([taskDetail, comments]) => {
+        if (cancelled) return;
+        setDetail(taskDetail);
+        setCommentCount(comments.length);
+      })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [task.id]);
 
   const handlePickStatus = async (sId: string) => {
@@ -747,7 +786,7 @@ function TaskDetail({ task, statuses, statusMap, onStatusChange, onRequestClose 
       style={styles.sheetScroll}
       showsVerticalScrollIndicator
       keyboardShouldPersistTaps="handled"
-      contentContainerStyle={{ paddingBottom: ctaInset + 16 }}
+      contentContainerStyle={{ flexGrow: 0, paddingBottom: ctaInset + 16 }}
     >
         <View style={styles.sheetHeader}>
           <Text style={[styles.sheetEyebrow, { color: c.accent }]}>{t.projectDetail.taskEyebrow}</Text>

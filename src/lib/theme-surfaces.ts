@@ -61,8 +61,14 @@ export function getModalBorderStops(scheme: ThemeScheme): [string, string, strin
   return ['rgba(255,255,255,0.2)', 'rgba(255,255,255,0.06)', 'rgba(255,255,255,0.1)'];
 }
 
-export function getScreenTopGlowStops(scheme: ThemeScheme, accent: string): [string, string] {
-  return scheme === 'dark' ? [`${accent}12`, 'transparent'] : [`${accent}06`, 'transparent'];
+/** Fade into `background` — never use literal `transparent` (renders as white on iOS light). */
+export function getScreenTopGlowStops(
+  scheme: ThemeScheme,
+  accent: string,
+  background: string,
+): [string, string] {
+  const fade = `${background}00`;
+  return scheme === 'dark' ? [`${accent}12`, fade] : [`${accent}04`, fade];
 }
 
 export function getLightCardElevation(): ViewStyle {
